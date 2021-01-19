@@ -4,12 +4,7 @@
 \alias{plot_mins_dist}
 \title{Minutes Distribution Plot}
 \usage{
-plot_mins_dist(
-  play_by_play_data = NA,
-  team = NA,
-  threshold = NA,
-  split_position = F
-)
+plot_mins_dist(play_by_play_data = NA, team = NA, threshold = NA)
 }
 \arguments{
 \item{team}{a single team name}

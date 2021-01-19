@@ -6,7 +6,6 @@
 \usage{
 get_team_schedule(
   team.id = NA,
-  season = NA,
   team.name = NA,
   use_file = F,
   save_file = F,
@@ -17,9 +16,7 @@ get_team_schedule(
 \arguments{
 \item{team.id}{The unique id given to each college/team for each season. This can be found in the url of the team page.}
 
-\item{season}{Season following format yyy1-y2, ex "2018=19"}
-
-\item{team.name}{Alternative to using the id, you can get a team from data(teamids) with a season and team name specification.
+\item{team.name}{You must also include a string team name
 This inputs a team name, to be used along with season. This needs the school name not the complete team name, so "Duke" not "Duke Blue Devils".}
 }
 \value{
@@ -40,6 +37,5 @@ This function returns a data frame of the schedule for the specified team. This 
 for play-by-play scraping if the game has ended, along with the team scores and attendance.
 }
 \examples{
-get_team_schedule(team.id = 450680)
-get_team_schedule(season = "2018-19", team.name = "Penn")
+get_team_schedule(team.id = 484200, team.name = "Penn")
 }

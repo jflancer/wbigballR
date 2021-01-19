@@ -86,24 +86,29 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
   half_scores <- table[[1]]
 
   # Get the data frames for the regulation portion
-  first_half <- table[[6]] %>%
+  first_quarter <- table[[6]] %>%
     dplyr::mutate_if(is.factor, as.character) %>%
     dplyr::mutate(Half_Status = 1)
-  second_half <- table[[8]] %>%
+  second_quarter <- table[[8]] %>%
     dplyr::mutate_if(is.factor, as.character) %>%
     dplyr::mutate(Half_Status = 2)
-  game <- dplyr::bind_rows(first_half, second_half)
+  third_quarter <- table[[10]] %>%
+    dplyr::mutate_if(is.factor, as.character) %>%
+    dplyr::mutate(Half_Status = 3)
+  fourth_quarter <- table[[12]] %>%
+    dplyr::mutate_if(is.factor, as.character) %>%
+    dplyr::mutate(Half_Status = 4)
 
   # Check if overtime period(s) exist
-  if (ncol(half_scores) == 4) {
+  if (ncol(half_scores) == 6) {
     numbOTs <- 0
   } else{
     # Iterate through overtimes and add to game data frame
-    numbOTs <- length(half_scores) - 4
+    numbOTs <- length(half_scores) - 6
     for (i in 1:numbOTs) {
-      ot_data <- table[[8 + i * 2]]  %>%
+      ot_data <- table[[12 + i * 2]]  %>%
         dplyr::mutate_if(is.factor, as.character) %>%
-        dplyr::mutate(Half_Status = 2 + i)
+        dplyr::mutate(Half_Status = 4 + i)
       game <- dplyr::bind_rows(game, ot_data)
     }
   }
@@ -114,7 +119,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
   # Can find the format by looking at the first entries as they are constant and unique to each version
   # As V1 is older and uses less detail, we will format the data in accordance with V1
   format <-
-    if (((first_half[1, 1] == "20:00:00") &
+    if (((first_half[1, 1] == "10:00:00") &
         (first_half[1, 2] == "game start" |
          first_half[1, 2] == "period start"|
          first_half[1,2] == "jumpball startperiod")) |
@@ -139,7 +144,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
   away_team <- colnames(game)[2]
   home_team <- colnames(game)[4]
 
-  # Get game time- formatted as 20:00 counting down to 0 for each half
+  # Get game time- formatted as 10:00 counting down to 0 for each quarter
   time <- substr(game[, 1], 1, 5)
 
   # Convert game time to seconds- goes from 0 at start to 2400+ at end of game
@@ -155,6 +160,14 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
   game_time <- ifelse(game[, 5] < 2,
                       1200 + 1200 * (game[, 5] - 1),
                       2400 + 300 * (game[, 5] - 2)) - time_in_seconds
+  
+  game_time <- dplyr::case_when(
+    game$Half_Status == 1 ~ 600 - time_in_seconds,
+    game$Half_Status == 2 ~ 1200 - time_in_seconds,
+    game$Half_Status == 3 ~ 1800 - time_in_seconds,
+    game$Half_Status == 4 ~ 2400 - time_in_seconds,
+    T ~ 2400 + 300 * (game$Half_Status - 4)
+  )
 
   # Differently formatted time that goes from 0 at game start to 40:00+ at end of game
   mins <- game_time %/% 60
@@ -425,7 +438,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
                                                "Dunk", "Layup", "Hook", "Tip In", "Steal", "Defensive Rebound"
                                                ))*1, .groups = "keep") %>%
     dplyr::ungroup() %>%
-    dplyr::mutate(Valid = dplyr::lag(End, default =0)) %>%
+    dplyr::mutate(Valid = dplyr::lag(End, default=0)) %>%
     dplyr::select(Poss_Num, Valid)
 
   dirty_game <- dirty_game %>%
@@ -444,7 +457,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
 
   # Test case for if shots are attributed correctly
   test_poss <- dirty_game %>% group_by(Event_Team, Poss_Team, Half_Status) %>% summarise(Pts = sum(!is.na(Event_Result), na.rm=T), .groups = "keep") %>% arrange(Half_Status)
-  if(sum(test_poss$Pts>0) != (2+numbOTs)*2) {
+  if(sum(test_poss$Pts>0) != (4+numbOTs)*2) {
     message("Warning: Possession Parsing Has Errors")
   }
 
@@ -542,7 +555,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
     away_player_matrix <- NA
 
     # Since starters aren't identified for each half, need to go through process to find them
-    for (i in 1:(2 + numbOTs)) {
+    for (i in 1:(4 + numbOTs)) {
       #Iterates through the number of game session
       half_data <- dplyr::filter(dirty_game, Half_Status == i)
 
@@ -553,7 +566,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
                       Event_Type == "Leaves Game",
                       # Player_1 != "TEAM",
                       Time != "00:00",
-                      (Time != "20:00" & Half_Status %in% 1:2) | (Time != "05:00" & Half_Status >2)
+                      (Time != "10:00" & Half_Status %in% 1:4) | (Time != "05:00" & Half_Status >4)
                       )$Player_1
       home_entering <-
         dplyr::filter(half_data,
@@ -561,7 +574,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
                       Event_Type == "Enters Game",
                       # Player_1 != "TEAM",
                       Time != "00:00",
-                      (Time != "20:00" & Half_Status %in% 1:2) | (Time != "05:00" & Half_Status >2)
+                      (Time != "10:00" & Half_Status %in% 1:4) | (Time != "05:00" & Half_Status >4)
                       )$Player_1
       away_leaving <-
         dplyr::filter(half_data,
@@ -569,20 +582,20 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
                       Event_Type == "Leaves Game",
                       # Player_1 != "TEAM",
                       Time != "00:00",
-                      (Time != "20:00" & Half_Status %in% 1:2) | (Time != "05:00" & Half_Status >2)
+                      (Time != "10:00" & Half_Status %in% 1:4) | (Time != "05:00" & Half_Status >4)
                       )$Player_1
       away_entering <-
         dplyr::filter(half_data,
                       Event_Team == Away,
                       Event_Type == "Enters Game",
                       # Player_1 != "TEAM",
-                      (Time != "20:00" & Half_Status %in% 1:2) | (Time != "05:00" & Half_Status >2)
+                      (Time != "10:00" & Half_Status %in% 1:4) | (Time != "05:00" & Half_Status >4)
                       )$Player_1
 
       # Find players explicitly defined as starting
       true_home_starters <- (half_data %>%
         dplyr::filter(Home == Event_Team,
-               (Time == "20:00" & Half_Status %in% 1:2) | (Time == "05:00" & Half_Status >2),
+               (Time == "10:00" & Half_Status %in% 1:4) | (Time == "05:00" & Half_Status >4),
                Time != "00:00",
                Event_Type == "Enters Game"
                ))$Player_1
@@ -601,7 +614,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
       # Find players explicitly defined as beginning from bench
       true_home_nonstarters <- (half_data %>%
                                dplyr::filter(Home == Event_Team,
-                                             (Time == "20:00" & Half_Status %in% 1:2) | (Time == "05:00" & Half_Status >2),
+                                             (Time == "10:00" & Half_Status %in% 1:4) | (Time == "05:00" & Half_Status >4),
                                              Event_Type == "Leaves Game"
                                ))$Player_1
 
@@ -709,7 +722,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
       # Best guess I could think of was look at the last player to record a stat in prior halfs
       if(any(is.na(home_starters))){
         numb.players <- sum(is.na(home_starters))
-        half_using <- if(i ==1){2:(numbOTs+1)} else {1:i}
+        half_using <- if(i ==1){4:(numbOTs+1)} else {1:i}
         prior_half <- filter(dirty_game,
                              Half_Status %in% half_using,
                              Event_Team == Home,
@@ -727,7 +740,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
       # Repeated process is done for the away team, refer to comments above
       true_away_starters <- (half_data %>%
                                dplyr::filter(Away == Event_Team,
-                                             (Time == "20:00" & Half_Status %in% 1:2) | (Time == "05:00" & Half_Status >2),
+                                             (Time == "10:00" & Half_Status %in% 1:4) | (Time == "05:00" & Half_Status >4),
                                              Time != "00:00",
                                              Event_Type == "Enters Game"
                                ))$Player_1
@@ -745,7 +758,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
 
     true_away_nonstarters <- (half_data %>%
                                 dplyr::filter(Away == Event_Team,
-                                              (Time == "20:00" & Half_Status %in% 1:2) | (Time == "05:00" & Half_Status >2),
+                                              (Time == "10:00" & Half_Status %in% 1:4) | (Time == "05:00" & Half_Status >4),
                                               Event_Type == "Leaves Game"
                                 ))$Player_1
 
@@ -834,7 +847,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
 
       if(any(is.na(away_starters))){
         numb.players <- sum(is.na(away_starters))
-        half_using <- if(i ==1){2:(numbOTs+1)} else {1:i}
+        half_using <- if(i ==1){4:(numbOTs+1)} else {1:i}
         prior_half <- filter(dirty_game,
                              Half_Status %in% half_using,
                              Event_Team == Away,
@@ -1352,8 +1365,7 @@ get_date_games <-
 #' This function returns a data frame of the schedule for the specified team. This will include game ids used
 #' for play-by-play scraping if the game has ended, along with the team scores and attendance.
 #' @param team.id The unique id given to each college/team for each season. This can be found in the url of the team page.
-#' @param season Season following format yyy1-y2, ex "2018=19"
-#' @param team.name Alternative to using the id, you can get a team from data(teamids) with a season and team name specification.
+#' @param team.name You must also include a string team name
 #' This inputs a team name, to be used along with season. This needs the school name not the complete team name, so "Duke" not "Duke Blue Devils".
 #' @importFrom XML readHTMLTable
 #' @import dplyr
@@ -1371,24 +1383,20 @@ get_date_games <-
 #' }
 #' @export
 #' @examples
-#' get_team_schedule(team.id = 450680)
-#' get_team_schedule(season = "2018-19", team.name = "Penn")
+#' get_team_schedule(team.id = 484200, team.name = "Penn")
 get_team_schedule <-
   function(team.id = NA,
-           season = NA,
            team.name = NA,
            use_file = F,
            save_file = F,
            base_path = NA,
            overwrite = F) {
-
     # If the user doesn't know id and instead gives a team name and season searches team DB for ID
     # This can only be done since 16-17 at the moment
-    if (is.na(team.id) & !is.na(team.name) & !is.na(season)) {
-      team.id <-
-        bigballR::teamids$ID[which(bigballR::teamids$Team == team.name & bigballR::teamids$Season == season)]
-    } else if(is.na(team.id) & is.na(team.name) & is.na(season)){
-      message("Improper Request")
+    if (is.na(team.id) | is.na(team.name)) {
+      # team.id <-
+        # wbigballR::teamids$ID[which(wbigballR::teamids$Team == team.name & wbigballR::teamids$Season == season)]
+      message("Team id and team name must be specified")
       return(NULL)
     }
 
@@ -1476,10 +1484,10 @@ get_team_schedule <-
       x <- unlist(x)
       t <- stringr::str_extract(x, "(?<=[\\#[0-9]+] ).*")
       t[is.na(t)] <- x[is.na(t)]
-      if(!any(trimws(t) %in% bigballR::teamids$Team)) {
+      if(!any(trimws(t) %in% wbigballR::teamids$Team)) {
         for(j in 1:length(t)) {
           i <- 1
-          while (!substr(t[j], 1, i) %in% bigballR::teamids$Team && i <= nchar(t[j])) {
+          while (!substr(t[j], 1, i) %in% wbigballR::teamids$Team && i <= nchar(t[j])) {
             i <- i + 1
           }
           t[j] = substr(t[j], 1, i)
@@ -1521,7 +1529,8 @@ get_team_schedule <-
       }
     }
 
-    team_name <- bigballR::teamids$Team[which(bigballR::teamids$ID == team.id)]
+    # team_name <- wbigballR::teamids$Team[which(wbigballR::teamids$ID == team.id)]
+    team_name <- team.name
 
     #This cleans the score information
     # score <- strsplit(df$Result, " - ") old
@@ -1583,8 +1592,6 @@ get_team_schedule <-
 #' This function returns a data frame of the roster for the specified team. This will include player names and positions
 #' as well as jersey number, height and school year.
 #' @param team.id The unique id given to each college/team for each season. This can be found in the url of the team page.
-#' @param season Alternative to using the id, you can get a team from data(teamids) with a season and team name specification.
-#' String for the season stored as yyy1-y2 (2018-19 is current)
 #' @param team.name Alternative to using the id, you can get a team from data(teamids) with a season and team name specification.
 #' This inputs a team name, to be used along with season. This needs the school name not the complete team name, so "Duke" not "Duke Blue Devils".
 #' @importFrom XML readHTMLTable
@@ -1605,20 +1612,18 @@ get_team_schedule <-
 
 get_team_roster <-
   function(team.id = NA,
-           season = NA,
            team.name = NA,
            use_file = F,
            save_file = F,
            base_path = NA,
            overwrite = F) {
-
+    
     # If the user doesn't know id and instead gives a team name and season searches team DB for ID
     # This can only be done since 16-17 at the moment
-    if (is.na(team.id) & !is.na(team.name) & !is.na(season)) {
-      team.id <-
-        bigballR::teamids$ID[which(bigballR::teamids$Team == team.name & bigballR::teamids$Season == season)]
-    } else if(is.na(team.id) & is.na(team.name) & is.na(season)){
-      message("Improper Request")
+    if (is.na(team.id) | is.na(team.name)) {
+      # team.id <-
+        # wbigballR::teamids$ID[which(wbigballR::teamids$Team == team.name & wbigballR::teamids$Season == season)]
+      message("team id and team name must be specified")
       return(NULL)
     }
 
@@ -3115,7 +3120,7 @@ binder <- dplyr::bind_rows
 #' @export
 #' @return ggplot object containing minutes distribution
 
-plot_mins_dist <- function(play_by_play_data = NA, team = NA, threshold = NA, split_position = F) {
+plot_mins_dist <- function(play_by_play_data = NA, team = NA, threshold = NA) {
   if(all(is.na(play_by_play_data)) | is.na(team)) {
     stop("Missing parameters")
   }
@@ -3165,17 +3170,6 @@ plot_mins_dist <- function(play_by_play_data = NA, team = NA, threshold = NA, sp
       paste(first,last)
     }
   }, USE.NAMES = F)
-
-  if(split_position) {
-    year <- substr(first(play_by_play_data$Date),7,10)
-    month <- substr(first(play_by_play_data$Date),1,2)
-    year <- ifelse(as.numeric(month)<=5, as.numeric(year)-1, year)
-
-    season <- paste0(as.numeric(year), "-", as.numeric(year)-1999)
-    roster <- get_team_roster(team.name = team, season = season)
-    totals <- left_join(totals, roster, by = "Player")
-    totals$CleanName <- paste(totals$Jersey,"-", totals$CleanName)
-  }
 
   totals$CleanName <- if(is.null(totals$CleanName)) labels else totals$CleanName
   totals$CleanName <- ifelse(totals$CleanName == "NA - NA", labels, totals$CleanName)
