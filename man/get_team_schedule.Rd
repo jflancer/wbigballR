@@ -7,6 +7,7 @@
 get_team_schedule(
   team.id = NA,
   team.name = NA,
+  season = NA,
   use_file = F,
   save_file = F,
   base_path = NA,

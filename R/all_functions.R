@@ -98,6 +98,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
   fourth_quarter <- table[[12]] %>%
     dplyr::mutate_if(is.factor, as.character) %>%
     dplyr::mutate(Half_Status = 4)
+  game <- bind_rows(first_quarter, second_quarter, third_quarter, fourth_quarter)
 
   # Check if overtime period(s) exist
   if (ncol(half_scores) == 6) {
@@ -119,10 +120,10 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
   # Can find the format by looking at the first entries as they are constant and unique to each version
   # As V1 is older and uses less detail, we will format the data in accordance with V1
   format <-
-    if (((first_half[1, 1] == "10:00:00") &
-        (first_half[1, 2] == "game start" |
-         first_half[1, 2] == "period start"|
-         first_half[1,2] == "jumpball startperiod")) |
+    if (((first_quarter[1, 1] == "10:00:00") &
+        (first_quarter[1, 2] == "game start" |
+         first_quarter[1, 2] == "period start"|
+         first_quarter[1,2] == "jumpball startperiod")) |
         any(grepl("commercial",game[,2]))) {
       "V2"
     } else{
@@ -1387,16 +1388,17 @@ get_date_games <-
 get_team_schedule <-
   function(team.id = NA,
            team.name = NA,
+           season = NA,
            use_file = F,
            save_file = F,
            base_path = NA,
            overwrite = F) {
     # If the user doesn't know id and instead gives a team name and season searches team DB for ID
-    # This can only be done since 16-17 at the moment
-    if (is.na(team.id) | is.na(team.name)) {
-      # team.id <-
-        # wbigballR::teamids$ID[which(wbigballR::teamids$Team == team.name & wbigballR::teamids$Season == season)]
-      message("Team id and team name must be specified")
+    if (is.na(team.id) & !is.na(team.name) & !is.na(season)) {
+      team.id <-
+        wbigballR::teamids$ID[which(wbigballR::teamids$Team == team.name & wbigballR::teamids$Season == season)]
+    } else if(is.na(team.id) & is.na(team.name) & is.na(season)){
+      message("Improper Request")
       return(NULL)
     }
 
@@ -1529,8 +1531,7 @@ get_team_schedule <-
       }
     }
 
-    # team_name <- wbigballR::teamids$Team[which(wbigballR::teamids$ID == team.id)]
-    team_name <- team.name
+    team_name <- wbigballR::teamids$Team[which(wbigballR::teamids$ID == team.id)]
 
     #This cleans the score information
     # score <- strsplit(df$Result, " - ") old
@@ -1613,17 +1614,18 @@ get_team_schedule <-
 get_team_roster <-
   function(team.id = NA,
            team.name = NA,
+           season = NA,
            use_file = F,
            save_file = F,
            base_path = NA,
            overwrite = F) {
     
     # If the user doesn't know id and instead gives a team name and season searches team DB for ID
-    # This can only be done since 16-17 at the moment
-    if (is.na(team.id) | is.na(team.name)) {
-      # team.id <-
-        # wbigballR::teamids$ID[which(wbigballR::teamids$Team == team.name & wbigballR::teamids$Season == season)]
-      message("team id and team name must be specified")
+    if (is.na(team.id) & !is.na(team.name) & !is.na(season)) {
+      team.id <-
+        wbigballR::teamids$ID[which(wbigballR::teamids$Team == team.name & wbigballR::teamids$Season == season)]
+    } else if(is.na(team.id) & is.na(team.name) & is.na(season)){
+      message("Improper Request")
       return(NULL)
     }
 
