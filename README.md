@@ -1,7 +1,6 @@
 # NCAAW bigballR
 
 - Worked in several sample games but has not been tested thoroughly
-- Additionally, the teamids dataframe is currently not available, so teams must be specified by their NCAA ID (see url on team page on stats.ncaa.org)
 
 ###NOTE THIS DOCUMENTATION IS SLIGHTLY OUTDATED FOLLOWING THE LATEST PACKAGE UPDATE 1/13
 
