@@ -1111,7 +1111,8 @@ get_date_games = function (date = as.character(format(Sys.Date() - 1, "%m/%d/%Y"
                            base_path = NA) 
 {
   dateform <- as.Date(as.character(date), format = "%m/%d/%Y")
-  seasonid <- dplyr::case_when(dateform > as.Date("2020-05-01") & 
+  seasonid <- dplyr::case_when(dateform > as.Date("2021-05-01") & dateform <= 
+                                 as.Date("2022-05-01") ~ 17763, dateform > as.Date("2020-05-01") & 
                                  dateform <= as.Date("2021-05-01") ~ 17440, dateform > 
                                  as.Date("2019-05-01") & dateform <= as.Date("2020-05-01") ~ 
                                  17001, dateform > as.Date("2018-05-01") & dateform <= 
@@ -1188,72 +1189,120 @@ get_date_games = function (date = as.character(format(Sys.Date() - 1, "%m/%d/%Y"
   else {
     table <- table[[1]]
   }
-  starting_rows <- (1:(nrow(table)/5)) * 5 - 4
+  
+  #The table is always read in the same messy way
+  #Each game in the schedule starts on a row following pattern 1,6,11,etc. this gets all of those indices
+  starting_rows <- (1:(nrow(table) / 5)) * 5 - 4
+  
+  # Pull game meta data from relevant part of the table
   game_date <- as.character(table$V1[starting_rows])
   attendance <- as.character(table$V7[starting_rows])
+  
   away_team <- as.character(table$V3[starting_rows])
   home_team <- as.character(table$V2[starting_rows + 3])
+  
   home_score <- as.character(table$V3[starting_rows + 3])
   away_score <- as.character(table$V5[starting_rows])
-  game_ids <- unlist(stringr::str_extract_all(html, "(?<=/contests/)\\d+(?=/box_score)"))
+  
+  # sees if a box score is available for each game
+  box_score_present <- as.character(table$V1[starting_rows + 4]) == "Box Score"
+  
+  #This searches for all game IDs on the schedule page, using links found in the html
+  game_ids <-
+    unlist(stringr::str_extract_all(html, "(?<=/contests/)\\d+(?=/box_score)"))
   game_ids <- game_ids[which(!game_ids %in% seasonid)]
+  
+  # Handle cancelled games with missing game ids, or if game is missing a box score
   id_found <- rep(NA, length(away_score))
-  id_found[!away_score %in% c("Canceled", "Ppd")] <- game_ids
+  id_found[!away_score %in% c("Canceled", "Ppd") & box_score_present] <- game_ids
+  
+  #Also creates variable used to find if a game was held at a neutral side
   isNeutral <- table$V6[starting_rows] != ""
+  
+  #Informs user of how many games and games with a relevant ID were found
   message(paste(date, "|", length(game_ids), "games found"))
-  url2 <- paste0("http://stats.ncaa.org/contests/", id_found, 
-                 "/box_score")
-  home_name = gsub(" [(].*[)]", "", home_team)
-  home_wins = unlist(stringr::str_extract_all(home_team, "(?<=[(])\\d+(?=-)"))
-  home_losses = unlist(stringr::str_extract_all(home_team, 
-                                                "(?<=-)\\d+(?=[)])"))
-  away_name = gsub(" [(].*[)]", "", away_team)
-  away_wins = unlist(stringr::str_extract_all(away_team, "(?<=[(])\\d+(?=-)"))
-  away_losses = unlist(stringr::str_extract_all(away_team, 
-                                                "(?<=-)\\d+(?=[)])"))
-  game_data <- data.frame(Date = substr(game_date, 1, 10), 
-                          Start_Time = substr(game_date, 12, 19), Home = home_name, 
-                          Away = away_name, BoxID = id_found, GameID = NA, Home_Score = home_score, 
-                          Away_Score = away_score, Attendance = attendance, Neutral_Site = isNeutral, 
-                          Home_Wins = as.numeric(home_wins), Home_Losses = as.numeric(home_losses), 
-                          Away_Wins = as.numeric(away_wins), Away_Losses = as.numeric(away_losses), 
-                          stringsAsFactors = F, row.names = NULL)
-  if (length(id_found) > 0) {
-    pb = txtProgressBar(min = 0, max = length(id_found), 
-                        initial = 0)
+  
+  # Unfortunately, the game ID for boxscore isn't the same as the game ID for pbp
+  # As a result, this function needs to convert from boxscore to pbp but as a result be slower
+  # Need to read each box score page and find link to pbp page
+  
+  url2 <-
+    paste0("http://stats.ncaa.org/contests/", id_found, "/box_score")
+  
+  # Clean team names
+  home_name = gsub(" [(].*[)]","", home_team)
+  home_wins = as.vector(stringr::str_extract_all(home_team, "(?<=[(])\\d+(?=-)", T))
+  home_losses = as.vector(stringr::str_extract_all(home_team, "(?<=-)\\d+(?=[)])", T))
+  
+  away_name = gsub(" [(].*[)]","", away_team)
+  away_wins = as.vector(stringr::str_extract_all(away_team, "(?<=[(])\\d+(?=-)", T))
+  away_losses = as.vector(stringr::str_extract_all(away_team, "(?<=-)\\d+(?=[)])", T))
+  
+  if(length(home_wins) == 0){home_wins = NA}
+  if(length(home_losses) == 0){home_losses = NA}
+  if(length(away_wins) == 0){away_wins = NA}
+  if(length(away_losses) == 0){away_losses = NA}
+  
+  #Create dataframe
+  game_data <- data.frame(
+    Date = substr(game_date, 1, 10),
+    Start_Time = substr(game_date, 12, 19),
+    Home = home_name,
+    Away = away_name,
+    BoxID = id_found,
+    GameID = NA,
+    Home_Score = home_score,
+    Away_Score = away_score,
+    Attendance = attendance,
+    Neutral_Site = isNeutral,
+    Home_Wins = as.numeric(home_wins),
+    Home_Losses = as.numeric(home_losses),
+    Away_Wins = as.numeric(away_wins),
+    Away_Losses = as.numeric(away_losses),
+    
+    stringsAsFactors = F,
+    row.names = NULL
+  )
+  
+  # Have to iterate through every game for the given day and find all play by play ids on the box score page
+  if(length(id_found)>0){
+    pb = txtProgressBar(min = 0, max = length(id_found), initial = 0)
     for (i in 1:length(id_found)) {
-      if (url2[i] != "http://stats.ncaa.org/contests/NA/box_score") {
+      if(url2[i] !=  "http://stats.ncaa.org/contests/NA/box_score") {
         file_dir <- paste0(base_path, "box_score/")
         file_path <- paste0(file_dir, id_found[i], ".html")
         isUrlRead <- F
+        
+        # Assumes that if pbp is available from file it will always be used rather than re-scraping
         if (!is.na(base_path) & file.exists(file_path)) {
-          temp_html <- readLines(file_path, warn = F)
-        }
-        else {
+          temp_html <- readLines(file_path, warn=F)
+        } else {
           isUrlRead <- T
-          file_url <- url(url2[i], headers = c(`User-Agent` = "My Custom User Agent"))
-          temp_html <- readLines(con = file_url, warn = F)
+          file_url <- url(url2[i], headers = c("User-Agent" = "My Custom User Agent"))
+          temp_html <- readLines(con = file_url, warn=F)
           close(file_url)
         }
+        
+        # Give user option to save raw html file (to make future processing more efficient)
         if (save_file & !is.na(base_path) & !file.exists(file_path)) {
           dir.create(file_dir, recursive = T, showWarnings = F)
           writeLines(temp_html, file_path)
         }
-        new_id <- unlist(stringr::str_extract(temp_html, 
-                                              "(?<=play_by_play/)\\d+"))
+        
+        new_id <- unlist(stringr::str_extract(temp_html, "(?<=play_by_play/)\\d+"))
         new_id <- unique(new_id[!is.na(new_id)])
         game_data$GameID[i] <- new_id
-        if (isUrlRead) {
+        if(isUrlRead) {
           Sys.sleep(0.5)
         }
-        setTxtProgressBar(pb, i)
+        setTxtProgressBar(pb,i)
       }
     }
     close(pb)
-  }
-  else {
+  } else {
     message("No Game IDs Found")
   }
+  
   return(game_data)
 }
 
@@ -3312,7 +3361,7 @@ get_box_scores <- function(game_ids, multi.games = F, use_file = F, save_file = 
   #Cleans list of game ids to remove nas
   game_ids <- game_ids[!is.na(game_ids)]
   #Scrape all game ids into list
-
+  
   game_list <- lapply(game_ids, function(x) {
     # Add error handling so if one game throws an error it will report and continue iterating
     tryCatch(scrape_box(x, use_file = use_file, save_file = save_file, base_path = base_path, overwrite=overwrite), error = function(e){
@@ -3320,7 +3369,7 @@ get_box_scores <- function(game_ids, multi.games = F, use_file = F, save_file = 
       return(NA)
     })
   })
-
+  
   dirty_ind <- which(is.na(game_list))
   #Remove any incorrect games found
   if(length(dirty_ind) > 0) game_list <- game_list[-dirty_ind]
@@ -3329,13 +3378,13 @@ get_box_scores <- function(game_ids, multi.games = F, use_file = F, save_file = 
   if(length(dirty_ind) != 0) {
     message(paste(paste(game_ids[dirty_ind], collapse = ","), "removed"))
   }
-
+  
   game_data <- game_data %>%
     dplyr::filter(MP != '') %>%
     dplyr::mutate(
-      dplyr::across(all_of(c("G", "FGM", "FGA", "TPM", "TPA", "FTM", "FTA", "PTS", "ORB", "DRB", "TRB", "AST", "TO", "STL", "BLK", "Fouls", "DQ", "Tech")), function(x){x[x==''] <- 0; return(x)}),
-      dplyr::across(all_of(c("MP", "G", "FGM", "FGA", "TPM", "TPA", "FTM", "FTA", "PTS", "ORB", "DRB", "TRB", "AST", "TO", "STL", "BLK", "Fouls", "DQ", "Tech")), ~gsub("\\/", "", .x)),
-      dplyr::across(all_of(c("G", "FGM", "FGA", "TPM", "TPA", "FTM", "FTA", "PTS", "ORB", "DRB", "TRB", "AST", "TO", "STL", "BLK", "Fouls", "DQ", "Tech")), as.numeric),
+      dplyr::across(all_of(c("G", "FGM", "FGA", "TPM", "TPA", "FTM", "FTA", "PTS", "ORB", "DRB", "TRB", "AST", "TO", "STL", "BLK", "PF", "DQ", "Tech")), function(x){x[x==''] <- 0; return(x)}),
+      dplyr::across(all_of(c("MP", "G", "FGM", "FGA", "TPM", "TPA", "FTM", "FTA", "PTS", "ORB", "DRB", "TRB", "AST", "TO", "STL", "BLK", "PF", "DQ", "Tech")), ~gsub("\\/", "", .x)),
+      dplyr::across(all_of(c("G", "FGM", "FGA", "TPM", "TPA", "FTM", "FTA", "PTS", "ORB", "DRB", "TRB", "AST", "TO", "STL", "BLK", "PF", "DQ", "Tech")), as.numeric),
       MP = round(as.numeric(gsub(":(.*)", "", MP)) + as.numeric(gsub("(.*):", "", MP))/60, 1),
       FG. = FGM / FGA,
       TP. = TPM / TPA,
@@ -3345,9 +3394,9 @@ get_box_scores <- function(game_ids, multi.games = F, use_file = F, save_file = 
       dplyr::across(where(is.numeric), function(x){x[is.nan(x)] <- 0; return(x)})
     ) %>%
     dplyr::select(
-      Game_ID:MP, PTS, ORB, DRB, TRB, AST, TO, STL, BLK, FGA, FGM, FG., TPA, TPM, TP., FTA, FTM, FT., TS., eFG., Fouls, DQ, Tech, CleanName
+      Game_ID:MP, PTS, ORB, DRB, TRB, AST, TO, STL, BLK, FGA, FGM, FG., TPA, TPM, TP., FTA, FTM, FT., TS., eFG., PF, DQ, Tech, CleanName
     )
-
+  
   if (multi.games == T) {
     multi_game <- game_data %>%
       dplyr::select(-Game_ID) %>%
@@ -3356,7 +3405,7 @@ get_box_scores <- function(game_ids, multi.games = F, use_file = F, save_file = 
         across(where(is.numeric), sum),
         G = n(),
         .groups = "drop"
-        ) %>%
+      ) %>%
       dplyr::mutate(
         FG. = FGM / FGA,
         TP. = TPM / TPA,
@@ -3365,12 +3414,12 @@ get_box_scores <- function(game_ids, multi.games = F, use_file = F, save_file = 
         eFG. = (FGM + 0.5 * TPM) / FGA) %>%
       dplyr::mutate(dplyr::across(where(is.numeric), function(x){x[is.nan(x)] <- 0; return(x)})) %>%
       dplyr::select(
-        Player, CleanName, Team, Pos, MP, G, PTS, ORB, DRB, TRB, AST, TO, STL, BLK, FGA, FGM, FG., TPA, TPM, TP., FTA, FTM, FT., TS., eFG., Fouls, DQ, Tech, CleanName
+        Player, CleanName, Team, Pos, MP, G, PTS, ORB, DRB, TRB, AST, TO, STL, BLK, FGA, FGM, FG., TPA, TPM, TP., FTA, FTM, FT., TS., eFG., PF, DQ, Tech, CleanName
       )
-
-      return(multi_game)
+    
+    return(multi_game)
   }
-
+  
   return(game_data)
 }
 
