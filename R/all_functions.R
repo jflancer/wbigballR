@@ -1111,23 +1111,44 @@ get_date_games = function (date = as.character(format(Sys.Date() - 1, "%m/%d/%Y"
                            base_path = NA) 
 {
   dateform <- as.Date(as.character(date), format = "%m/%d/%Y")
-  seasonid <- dplyr::case_when(dateform > as.Date("2021-05-01") & dateform <= 
-                                 as.Date("2022-05-01") ~ 17763, dateform > as.Date("2020-05-01") & 
-                                 dateform <= as.Date("2021-05-01") ~ 17440, dateform > 
-                                 as.Date("2019-05-01") & dateform <= as.Date("2020-05-01") ~ 
-                                 17001, dateform > as.Date("2018-05-01") & dateform <= 
-                                 as.Date("2019-05-01") ~ 16720, dateform > as.Date("2017-05-01") & 
-                                 dateform <= as.Date("2018-05-01") ~ 14100, dateform > 
-                                 as.Date("2016-05-01") & dateform <= as.Date("2017-05-01") ~ 
-                                 13120, dateform > as.Date("2015-05-01") & dateform <= 
-                                 as.Date("2016-05-01") ~ 12701, dateform > as.Date("2014-05-01") & 
-                                 dateform <= as.Date("2015-05-01") ~ 12321, dateform > 
-                                 as.Date("2013-05-01") & dateform <= as.Date("2014-05-01") ~ 
-                                 11660, dateform > as.Date("2012-05-01") & dateform <= 
-                                 as.Date("2013-05-01") ~ 10882, dateform > as.Date("2011-05-01") & 
-                                 dateform <= as.Date("2012-05-01") ~ 10520, dateform > 
-                                 as.Date("2010-05-01") & dateform <= as.Date("2011-05-01") ~ 
-                                 10200, T ~ 0)
+  seasonid <-
+    dplyr::case_when(
+      dateform > as.Date("2022-05-01") & dateform <=
+        as.Date("2023-05-01") ~ 17941,
+      dateform > as.Date("2021-05-01") & dateform <=
+        as.Date("2022-05-01") ~ 17763,
+      dateform > as.Date("2020-05-01") &
+        dateform <= as.Date("2021-05-01") ~ 17440,
+      dateform >
+        as.Date("2019-05-01") &
+        dateform <= as.Date("2020-05-01") ~
+        17001,
+      dateform > as.Date("2018-05-01") & dateform <=
+        as.Date("2019-05-01") ~ 16720,
+      dateform > as.Date("2017-05-01") &
+        dateform <= as.Date("2018-05-01") ~ 14100,
+      dateform >
+        as.Date("2016-05-01") &
+        dateform <= as.Date("2017-05-01") ~
+        13120,
+      dateform > as.Date("2015-05-01") & dateform <=
+        as.Date("2016-05-01") ~ 12701,
+      dateform > as.Date("2014-05-01") &
+        dateform <= as.Date("2015-05-01") ~ 12321,
+      dateform >
+        as.Date("2013-05-01") &
+        dateform <= as.Date("2014-05-01") ~
+        11660,
+      dateform > as.Date("2012-05-01") & dateform <=
+        as.Date("2013-05-01") ~ 10882,
+      dateform > as.Date("2011-05-01") &
+        dateform <= as.Date("2012-05-01") ~ 10520,
+      dateform >
+        as.Date("2010-05-01") &
+        dateform <= as.Date("2011-05-01") ~
+        10200,
+      T ~ 0
+    )
   if (seasonid == 0) {
     return("Season Not Available")
   }
