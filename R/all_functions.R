@@ -48,16 +48,20 @@
 #' @examples
 #' scrape_game(4674164)
 scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwrite=F) {
-
+  
   #track status of cleanliness of data for game
   status <- "CLEAN"
-
-  base_url <- "http://stats.ncaa.org/game/play_by_play/"
+  
+  base_url <- "https://stats.ncaa.org/game/play_by_play/"
   url_text <- paste0(base_url, game_id)
+  
+  # new
+  base_url <- "https://stats.ncaa.org/contests/game_id/play_by_play/"
+  url_text <- glue::glue("https://stats.ncaa.org/contests/{game_id}/play_by_play/")
   file_dir <- paste0(base_path, "play_by_play/")
   file_path <- paste0(file_dir, game_id, ".html")
   isUrlRead <- F
-
+  
   # Give user option to save raw html file (to make future processing more efficient)
   if (save_file & !is.na(base_path) & (!file.exists(file_path) | overwrite)) {
     isUrlRead <- T
@@ -74,80 +78,75 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
     html <- readLines(con = file_url, warn=F)
     close(file_url)
   }
-
+  
   table <- XML::readHTMLTable(html)
-
+  
   if (length(table) == 0) {
     message("Game Not Found")
     return(data.frame())
   }
-
+  
   # Pull scores for each half
-  half_scores <- table[[1]]
-
+  half_scores <- table[[2]][1:2,]
+  
   # Get the data frames for the regulation portion
-  first_quarter <- table[[6]] %>%
+  first_half <- table[[4]] %>%
     dplyr::mutate_if(is.factor, as.character) %>%
     dplyr::mutate(Half_Status = 1)
-  second_quarter <- table[[8]] %>%
+  second_half <- table[[5]] %>%
     dplyr::mutate_if(is.factor, as.character) %>%
     dplyr::mutate(Half_Status = 2)
-  third_quarter <- table[[10]] %>%
-    dplyr::mutate_if(is.factor, as.character) %>%
-    dplyr::mutate(Half_Status = 3)
-  fourth_quarter <- table[[12]] %>%
-    dplyr::mutate_if(is.factor, as.character) %>%
-    dplyr::mutate(Half_Status = 4)
-  game <- bind_rows(first_quarter, second_quarter, third_quarter, fourth_quarter)
-
+  game <- dplyr::bind_rows(first_half, second_half)
+  
   # Check if overtime period(s) exist
-  if (ncol(half_scores) == 6) {
+  if (ncol(half_scores) == 4) {
     numbOTs <- 0
   } else{
     # Iterate through overtimes and add to game data frame
-    numbOTs <- length(half_scores) - 6
+    numbOTs <- length(half_scores) - 4
     for (i in 1:numbOTs) {
-      ot_data <- table[[12 + i * 2]]  %>%
+      ot_data <- table[[5 + i]]  %>%
         dplyr::mutate_if(is.factor, as.character) %>%
-        dplyr::mutate(Half_Status = 4 + i)
+        dplyr::mutate(Half_Status = 2 + i)
       game <- dplyr::bind_rows(game, ot_data)
     }
   }
-
+  
   # Essentially, there are two different codes/systems used by the NCAA to track games
   # This makes the content completely different and needs to be adjusted for
   # 'V2' is dubbed version 2, as it has more detail and began usage more recently
   # Can find the format by looking at the first entries as they are constant and unique to each version
   # As V1 is older and uses less detail, we will format the data in accordance with V1
   format <-
-    if (((first_quarter[1, 1] == "10:00:00") &
-        (first_quarter[1, 2] == "game start" |
-         first_quarter[1, 2] == "period start"|
-         first_quarter[1,2] == "jumpball startperiod")) |
-        any(grepl("commercial",game[,2]))) {
+    if (((first_half[1, 1] == "20:00:00") &
+         (first_half[1, 2] == "game start" |
+          first_half[1, 2] == "period start"|
+          first_half[1,2] == "jumpball startperiod")) |
+        any(grepl("commercial",game[,2]))|
+        any(grepl("Technical",first_half[1,]))) {
       "V2"
     } else{
       "V1"
     }
-
+  
   # Removes unneccesary extraneous rows that may arise
   game <- dplyr::filter(game, !is.na(Score))
-
+  
   # Get the game metadata
-  meta <- table[[3]]
-
+  meta <- table[[2]]
+  
   # Get Game Date- removing start time because I don't really see a use in play by play
-  datetime <- colnames(meta)[2]
+  datetime <- meta[3,1]
   date <- substr(datetime, 1, 10)
   date <- ifelse(is.null(date),"",date)
-
+  
   # Get the teams playing
   away_team <- colnames(game)[2]
   home_team <- colnames(game)[4]
-
-  # Get game time- formatted as 10:00 counting down to 0 for each quarter
+  
+  # Get game time- formatted as 20:00 counting down to 0 for each half
   time <- substr(game[, 1], 1, 5)
-
+  
   # Convert game time to seconds- goes from 0 at start to 2400+ at end of game
   time_in_seconds <-
     unlist(lapply(strsplit(time, ":"), function(x) {
@@ -157,26 +156,18 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
         NA
       }
     }))
-
+  
   game_time <- ifelse(game[, 5] < 2,
                       1200 + 1200 * (game[, 5] - 1),
                       2400 + 300 * (game[, 5] - 2)) - time_in_seconds
   
-  game_time <- dplyr::case_when(
-    game$Half_Status == 1 ~ 600 - time_in_seconds,
-    game$Half_Status == 2 ~ 1200 - time_in_seconds,
-    game$Half_Status == 3 ~ 1800 - time_in_seconds,
-    game$Half_Status == 4 ~ 2400 - time_in_seconds,
-    T ~ 2400 + 300 * (game$Half_Status - 4)
-  )
-
   # Differently formatted time that goes from 0 at game start to 40:00+ at end of game
   mins <- game_time %/% 60
   mins <- ifelse(mins < 10, paste0("0", mins), as.character(mins))
   secs <- game_time %% 60
   secs <- ifelse(secs < 10, paste0("0", secs), as.character(secs))
   game_display <- paste0(mins, ":", secs)
-
+  
   # Separates score column into a separated home and away score
   scores <- strsplit(game[, 3], "-")
   home_score <- unlist(lapply(scores, function(x) {
@@ -185,7 +176,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
   away_score <- unlist(lapply(scores, function(x) {
     x[1]
   }))
-
+  
   # Data begins formatted with away team events in one column and home team events in another
   # With the formatting in use, there can never be a home and away event at the same time
   # This allows the home and away events to be merged into an events column
@@ -193,19 +184,19 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
   player1_a <- game[, 2]
   player1 <- player1_h
   player1[which(player1 == "" | is.na(player1))] <- player1_a[which(player1_a != "")]
-
+  
   events <- player1
   #Pulls the event team by looking at which entry side it comes from
   event_team <- ifelse(player1_h == player1, home_team, away_team)
-
+  
   # Handle PBP Version ####
   # Here is where the data is converted to a standard code
   if (format == "V2") {
     # Version 2 Cleaning
-
+    
     # Uses: player name, event
     event_split <- strsplit(events, ",")
-
+    
     event_split <- lapply(event_split, function(x){
       if(length(x) == 3){
         temp <- x
@@ -217,7 +208,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
         return(x)
       }
     })
-
+    
     # This pulls player names from left of comma
     players <-
       unlist(lapply(event_split, function(x) {
@@ -229,34 +220,34 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
     # Remove any notation of JR/SR/II/III from player name
     player_name <- gsub("(\\.JR\\.|\\.SR\\.|\\.J\\.R\\.|\\.JR\\.|JR\\.|SR\\.|\\.SR|\\.JR|\\.SR|\\.III|\\.II|\\.IV)$","", player_name)
     player_name <- trimws(player_name)
-
+    
     # Now getting events from left of comma
     events <-
       unlist(lapply(event_split, function(x) {
         x[2]
       }))
-
+    
     # Call function that converts the formatting of events from V2 to V1
     events <- convert_events(events)
-
+    
   } else {
     # Version 1 Cleaning
-
+    
     # Follows format LAST,FIRST event_description
     event_split <- strsplit(events, " ")
-
+    
     # Find the all uppercase words to get player names
     players <-
       unlist(lapply(event_split, function(x) {
         paste(x[which(x == toupper(x) | x == "Team,")], collapse = " ")
       }))
-
+    
     # Take all other words as a component of the event
     events <-
       unlist(lapply(event_split, function(x) {
         paste(x[which(x != toupper(x) & x != "Team,")], collapse = " ")
       }))
-
+    
     # Clean the player names into a proper format
     clean_players <- strsplit(players, ",")
     first <- unlist(lapply(clean_players, function(x) {
@@ -268,36 +259,36 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
     first <- ifelse(is.na(first), "", first)
     first <- gsub("[^[:alnum:] ]", "", first)
     last <- gsub("[^[:alnum:] ]", "", last)
-
+    
     player_name <- paste0(first, ".", last)
     player_name <- ifelse(substr(player_name, 1, 2) == ".T", "TEAM", player_name)
     player_name <- gsub("\\s+", ".", player_name)
     player_name <- gsub("(\\.JR\\.|\\.SR\\.|\\.J\\.R\\.|\\.JR\\.|JR\\.|SR\\.|\\.SR|\\.JR|\\.SR|\\.III|\\.II|\\.IV)$","", player_name)
   }
-
+  
   # Now format controls for version
-
+  
   # Separate event into first word and rest of word
   first_word <-
     unlist(lapply(strsplit(events, " "), function(x) {
       x[1]
     }))
-
+  
   remaining <- unlist(lapply(strsplit(events, " "),
                              function(x) {
                                paste(x[2:length(x)], collapse = " ")
                              }))
-
+  
   # Shots are preceded by "made" or "missed", this strips that from the event type
   event_type <-
     ifelse(first_word %in% c("made", "missed"), remaining, events)
-
+  
   # This pulls the event result only in the case of shots
   event_result <-
     ifelse(first_word %in% c("made", "missed"),
            first_word,
            NA_character_)
-
+  
   # Now put together created variables into first data frame
   dirty_game <- data.frame(
     ID = game_id,
@@ -373,7 +364,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
         Event_Type == "Hook" ~ 2
       )
     )
-
+  
   # Calculating Possessions ####
   poss_num <- 0
   nrows <- 0
@@ -383,14 +374,14 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
     other_team <- ifelse(poss_team == home_team, away_team, home_team)
     poss_switch = F
     poss_num <- poss_num + 1
-
+    
     for(j in 1:nrow(half_data)) {
       # If row has event that ends possession, increment num and swap team
       team <- half_data$Event_Team[j]
       type <- half_data$Event_Type[j]
       result <- half_data$Event_Result[j]
       seconds <- half_data$Game_Seconds[j]
-
+      
       # Using max(j-1, 1) to handle first entry
       swap <- poss_switch & seconds != half_data$Game_Seconds[max(j-1, 1)]
       if(swap) {
@@ -400,7 +391,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
         other_team <- tmp
         poss_switch <- F
       }
-
+      
       # force switch possession if event is attributed to wrong possession team, if parse is false this puts it back to correct
       # revisit - might be a more efficient way
       if (!is.na(result) & team != poss_team | type == "Turnover" & poss_team != team) {
@@ -410,26 +401,26 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
         other_team <- tmp
         poss_switch <- F
       }
-
+      
       and_one <- any(half_data$Event_Type[half_data$Game_Seconds == seconds] == "Free Throw") # Detect and-one to not switch possession on the made shot
       next_reb <-half_data$Event_Type[j+1] %in% c("Defensive Rebound", "Free Throw") # Catch final free throw misses -- note free throw sequences are occassionally out of order in pbp
-
+      
       if(
         type %in% c("Defensive Rebound", "Turnover") |
         (type %in% c("Two Point Jumper", "Three Point Jumper", "Layup", "Dunk", "Tip In", "Hook") & result == "made" & !and_one) |
         (type == "Free Throw" & result == "made" & !next_reb)
       ) {
-
+        
         # Free throw made + current or next time does not include a defensive rebound
         poss_switch = T
       }
-
+      
       dirty_game$Poss_Num[j+nrows] <- poss_num
       dirty_game$Poss_Team[j+nrows] <- poss_team
     }
     nrows <- nrows + nrow(half_data)
   }
-
+  
   pos_start <- dirty_game %>%
     dplyr::group_by(Poss_Num) %>%
     dplyr::mutate(
@@ -437,11 +428,11 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
     ) %>%
     dplyr::summarise(End = any(Terminal %in% c("Two Point Jumper", "Three Point Jumper", "Free Throw",
                                                "Dunk", "Layup", "Hook", "Tip In", "Steal", "Defensive Rebound"
-                                               ))*1, .groups = "keep") %>%
+    ))*1, .groups = "keep") %>%
     dplyr::ungroup() %>%
-    dplyr::mutate(Valid = dplyr::lag(End, default=0)) %>%
+    dplyr::mutate(Valid = dplyr::lag(End, default =0)) %>%
     dplyr::select(Poss_Num, Valid)
-
+  
   dirty_game <- dirty_game %>%
     dplyr::left_join(pos_start, by = "Poss_Num") %>%
     dplyr::group_by(Poss_Num) %>%
@@ -455,26 +446,26 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
     ) %>%
     dplyr::select(-Valid) %>%
     dplyr::ungroup()
-
+  
   # Test case for if shots are attributed correctly
   test_poss <- dirty_game %>% group_by(Event_Team, Poss_Team, Half_Status) %>% summarise(Pts = sum(!is.na(Event_Result), na.rm=T), .groups = "keep") %>% arrange(Half_Status)
-  if(sum(test_poss$Pts>0) != (4+numbOTs)*2) {
+  if(sum(test_poss$Pts>0) != (2+numbOTs)*2) {
     message("Warning: Possession Parsing Has Errors")
   }
-
+  
   # Detect games with invalid substitutions - rather than parsing clearly flawed data, return with no sub format
   player_subs <- dirty_game %>%
     filter(Event_Type %in% c("Enters Game", "Exits Game")) %>%
     .$Player_1
-
+  
   # 1. If a number is used for a substitution
   # 2. If TEAM is used
   # 3. If a team name is used
   invalid_sub <- any(grepl(paste0("\\.[0-9]+|\\.TEAM|",toupper(home_team),"|", toupper(away_team)), player_subs))
-
+  
   # Now Check to See if Players Were Recorded in the Game
   if (length(unique(dirty_game$Player_1)) == 1 | invalid_sub | length(player_subs) == 0) {
-
+    
     # No Player Cleaning
     # Found no player names in data
     # Does final cleaning of data without finding on off
@@ -486,11 +477,11 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
         Sub_Deviate = nrow(.)
       ) %>%
       bind_cols(as.data.frame(matrix(rep(NA, nrow(dirty_game)*10),
-                       ncol = 10,
-                       nrow = nrow(dirty_game))) %>%
+                                     ncol = 10,
+                                     nrow = nrow(dirty_game))) %>%
                   rename(Home.1 = V1, Home.2 = V2, Home.3 = V3, Home.4 = V4, Home.5 = V5,
                          Away.1 = V6, Away.2 = V7, Away.3 = V8, Away.4 = V9, Away.5 = V10
-                         )) %>%
+                  )) %>%
       dplyr::select(
         ID:Away,
         Half_Status,
@@ -509,7 +500,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
         Status,
         Sub_Deviate
       )
-
+    
     # Report results
     # Include game info, that pbp was missing players, and which format was used
     message(paste(
@@ -522,7 +513,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
       "|",
       game_id
     ))
-
+    
     return(clean_game)
   } else {
     # Search for extraneous error substitutions
@@ -530,7 +521,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
     # Find errors when an odd number of substitutions occur together
     mins_errors <- dirty_game %>%
       dplyr::filter(Event_Type %in% c("Leaves Game", "Enters Game"),
-             Game_Seconds != 1200) %>%
+                    Game_Seconds != 1200) %>%
       dplyr::group_by(Game_Seconds) %>%
       dplyr::summarise(count = dplyr::n(), .groups = "keep") %>%
       dplyr::ungroup() %>%
@@ -548,18 +539,18 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
       # Changes the status variable to note a sub mistake was made
       status <- "SUB_MISTAKE"
     }
-
+    
     # On Court ####
-
+    
     # Create empty matrix variables to store on court
     home_player_matrix <- NA
     away_player_matrix <- NA
-
+    
     # Since starters aren't identified for each half, need to go through process to find them
-    for (i in 1:(4 + numbOTs)) {
+    for (i in 1:(2 + numbOTs)) {
       #Iterates through the number of game session
       half_data <- dplyr::filter(dirty_game, Half_Status == i)
-
+      
       #Get vectors for players leaving and entering game for both teams
       home_leaving <-
         dplyr::filter(half_data,
@@ -567,40 +558,40 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
                       Event_Type == "Leaves Game",
                       # Player_1 != "TEAM",
                       Time != "00:00",
-                      (Time != "10:00" & Half_Status %in% 1:4) | (Time != "05:00" & Half_Status >4)
-                      )$Player_1
+                      (Time != "20:00" & Half_Status %in% 1:2) | (Time != "05:00" & Half_Status >2)
+        )$Player_1
       home_entering <-
         dplyr::filter(half_data,
                       Event_Team == Home,
                       Event_Type == "Enters Game",
                       # Player_1 != "TEAM",
                       Time != "00:00",
-                      (Time != "10:00" & Half_Status %in% 1:4) | (Time != "05:00" & Half_Status >4)
-                      )$Player_1
+                      (Time != "20:00" & Half_Status %in% 1:2) | (Time != "05:00" & Half_Status >2)
+        )$Player_1
       away_leaving <-
         dplyr::filter(half_data,
                       Event_Team == Away,
                       Event_Type == "Leaves Game",
                       # Player_1 != "TEAM",
                       Time != "00:00",
-                      (Time != "10:00" & Half_Status %in% 1:4) | (Time != "05:00" & Half_Status >4)
-                      )$Player_1
+                      (Time != "20:00" & Half_Status %in% 1:2) | (Time != "05:00" & Half_Status >2)
+        )$Player_1
       away_entering <-
         dplyr::filter(half_data,
                       Event_Team == Away,
                       Event_Type == "Enters Game",
                       # Player_1 != "TEAM",
-                      (Time != "10:00" & Half_Status %in% 1:4) | (Time != "05:00" & Half_Status >4)
-                      )$Player_1
-
+                      (Time != "20:00" & Half_Status %in% 1:2) | (Time != "05:00" & Half_Status >2)
+        )$Player_1
+      
       # Find players explicitly defined as starting
       true_home_starters <- (half_data %>%
-        dplyr::filter(Home == Event_Team,
-               (Time == "10:00" & Half_Status %in% 1:4) | (Time == "05:00" & Half_Status >4),
-               Time != "00:00",
-               Event_Type == "Enters Game"
-               ))$Player_1
-
+                               dplyr::filter(Home == Event_Team,
+                                             (Time == "20:00" & Half_Status %in% 1:2) | (Time == "05:00" & Half_Status >2),
+                                             Time != "00:00",
+                                             Event_Type == "Enters Game"
+                               ))$Player_1
+      
       # Figure out starters by finding players that have a "Leaves Game" entry before an "Enters Game" entry
       if (length(home_leaving) > 0) {
         home_starters <- c()
@@ -611,27 +602,27 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
           }
         }
       }
-
+      
       # Find players explicitly defined as beginning from bench
       true_home_nonstarters <- (half_data %>%
-                               dplyr::filter(Home == Event_Team,
-                                             (Time == "10:00" & Half_Status %in% 1:4) | (Time == "05:00" & Half_Status >4),
-                                             Event_Type == "Leaves Game"
-                               ))$Player_1
-
+                                  dplyr::filter(Home == Event_Team,
+                                                (Time == "20:00" & Half_Status %in% 1:2) | (Time == "05:00" & Half_Status >2),
+                                                Event_Type == "Leaves Game"
+                                  ))$Player_1
+      
       # Ignore if a player subs on for themselves at the beginning of a half
       temp_swap <- true_home_starters
       true_home_starters <- true_home_starters[which(!true_home_starters %in% true_home_nonstarters)]
       true_home_nonstarters <- true_home_nonstarters[which(!true_home_nonstarters %in% temp_swap)]
-
+      
       # Remove defined non-starters from starters
       home_starters <- home_starters[which(!home_starters %in% true_home_nonstarters)]
       true_home_starters <- true_home_starters[which(!true_home_starters %in% home_starters)]
       home_starters <- c(home_starters, true_home_starters)
-
+      
       # To handle data entry errors, often 5 starters cannot be found using proper method above
       home_starters <- if (length(home_starters) < 5) {
-
+        
         # First remove any extraneous Player.1 entries dealing with team events
         # I think I've narrowed it down so only "TEAM" can show up in certain cases, but couldn't see a need to remove the others just in case
         home_split <-
@@ -646,14 +637,14 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
               "TEAM.TEAM 20"
             )
           )
-
+        
         # Handle case if a player was subbed out for themselves and started the game
         # Has actually happened on several occassions
         error_catch <- c()
         for (time in unique(home_split$Game_Seconds)) {
           # Idk just ignoring late subs when game gets weird
           temp <- dplyr::filter(home_split, Game_Seconds == time, Game_Seconds < max(Game_Seconds)-60)
-
+          
           ons <-
             temp$Player_1[which(temp$Event_Type == "Enters Game")]
           offs <-
@@ -661,11 +652,11 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
           error_catch <- c(error_catch, ons[ons %in% offs])
         }
         error_catch <- error_catch[!error_catch %in% home_starters]
-
+        
         # Looks for players that registered events but never subbed in/out, this implies they are a starter
         non_subs <-
           unique(home_split[which(!home_split$Player_1 %in% c(home_leaving, home_entering,home_starters,true_home_nonstarters)),]$Player_1)
-
+        
         # See if player recorded an event before ever subbing out of the game
         play_before_sub <- home_split %>%
           group_by(Player_1) %>%
@@ -673,10 +664,10 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
           distinct(Player_1) %>%
           filter(!Player_1 %in% home_starters) %>%
           unlist(., use.names = F)
-
+        
         all_starters <- unique(c(home_starters, non_subs, play_before_sub, error_catch))
         # all_starters <- all_starters[which(!all_starters %in% home_bench)]
-
+        
         # If these methods find more than five starters, just chooses the first five found until a better way is suggested
         # Warn user that this is being used
         if (length(all_starters) > 5) {
@@ -689,14 +680,14 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
           #   )
           # )
           all_starters[1:5]
-        # If 5, checks have successfully found 5 starters
+          # If 5, checks have successfully found 5 starters
         } else if(length(all_starters) == 5){
           all_starters[1:5]
-        # Handle case when less than 5 starters are found even after error checks
+          # Handle case when less than 5 starters are found even after error checks
         } else {
           # Just takes first n players that have recorded an event in the half
           # all_found <- unique(c(home_starters, play_before_sub, non_subs, error_catch))
-
+          
           all_half_players <- half_data %>%
             filter(Event_Team == Home,
                    !Event_Type %in% c("Enters Game", "Leaves Game"),
@@ -706,7 +697,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
             unlist() %>%
             unique() %>%
             .[1:(5-length(all_starters))]
-
+          
           # If able to find 5 players, return them as starter and warn user
           if(length(c(all_starters, all_half_players)) == 5) {
             message("Warning In Substitution Data - Not Enough Starters Found. Using Estimate")
@@ -718,12 +709,12 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
       } else {
         home_starters[1:5]
       }
-
+      
       # Attempting to guess on who is on the court when a player plays the entire half and doesn't register a stat
       # Best guess I could think of was look at the last player to record a stat in prior halfs
       if(any(is.na(home_starters))){
         numb.players <- sum(is.na(home_starters))
-        half_using <- if(i ==1){4:(numbOTs+1)} else {1:i}
+        half_using <- if(i ==1){2:(numbOTs+1)} else {1:i}
         prior_half <- filter(dirty_game,
                              Half_Status %in% half_using,
                              Event_Team == Home,
@@ -732,20 +723,20 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
         players <- if(i == 1){
           unique(prior_half$Player_1, fromLast = T)[1:numb.players]
         } else {
-             rev(unique(prior_half$Player_1, fromLast = T))[1:numb.players]
-          }
+          rev(unique(prior_half$Player_1, fromLast = T))[1:numb.players]
+        }
         home_starters[is.na(home_starters)] <- players
         message(paste("5 starters not found for half",i, "choosing",players, collapse = "/"))
       }
-
+      
       # Repeated process is done for the away team, refer to comments above
       true_away_starters <- (half_data %>%
                                dplyr::filter(Away == Event_Team,
-                                             (Time == "10:00" & Half_Status %in% 1:4) | (Time == "05:00" & Half_Status >4),
+                                             (Time == "20:00" & Half_Status %in% 1:2) | (Time == "05:00" & Half_Status >2),
                                              Time != "00:00",
                                              Event_Type == "Enters Game"
                                ))$Player_1
-
+      
       if (length(away_leaving) > 0) {
         away_starters <- c()
         # away_bench <- c()
@@ -756,22 +747,22 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
           }
         }
       }
-
-    true_away_nonstarters <- (half_data %>%
-                                dplyr::filter(Away == Event_Team,
-                                              (Time == "10:00" & Half_Status %in% 1:4) | (Time == "05:00" & Half_Status >4),
-                                              Event_Type == "Leaves Game"
-                                ))$Player_1
-
-    temp_swap <- true_away_starters
-    true_away_starters <- true_away_starters[which(!true_away_starters %in% true_away_nonstarters)]
-    true_away_nonstarters <- true_away_nonstarters[which(!true_away_nonstarters %in% temp_swap)]
-
-    away_starters <- away_starters[which(!away_starters %in% true_away_nonstarters)]
-    true_away_starters <- true_away_starters[which(!true_away_starters %in% away_starters)]
-    away_starters <- c(away_starters, true_away_starters)
-
-    away_starters <- if (length(away_starters) < 5) {
+      
+      true_away_nonstarters <- (half_data %>%
+                                  dplyr::filter(Away == Event_Team,
+                                                (Time == "20:00" & Half_Status %in% 1:2) | (Time == "05:00" & Half_Status >2),
+                                                Event_Type == "Leaves Game"
+                                  ))$Player_1
+      
+      temp_swap <- true_away_starters
+      true_away_starters <- true_away_starters[which(!true_away_starters %in% true_away_nonstarters)]
+      true_away_nonstarters <- true_away_nonstarters[which(!true_away_nonstarters %in% temp_swap)]
+      
+      away_starters <- away_starters[which(!away_starters %in% true_away_nonstarters)]
+      true_away_starters <- true_away_starters[which(!true_away_starters %in% away_starters)]
+      away_starters <- c(away_starters, true_away_starters)
+      
+      away_starters <- if (length(away_starters) < 5) {
         away_split <-
           dplyr::filter(
             half_data,
@@ -794,10 +785,10 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
           error_catch <- c(error_catch, ons[ons %in% offs])
         }
         error_catch <- error_catch[!error_catch %in% away_starters]
-
+        
         non_subs <-
           unique(away_split[which(!away_split$Player_1 %in% c(away_leaving, away_entering,true_away_nonstarters,away_starters)),]$Player_1)
-
+        
         # See if player recorded an event before subbing out at start
         play_before_sub <- away_split %>%
           group_by(Player_1) %>%
@@ -805,10 +796,10 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
           distinct(Player_1) %>%
           filter(!Player_1 %in% away_starters) %>%
           unlist(., use.names = F)
-
+        
         all_starters <- unique(c(away_starters, non_subs, play_before_sub, error_catch))
         # all_starters <- all_starters[which(!all_starters %in% away_bench)]
-
+        
         if (length(all_starters) > 5) {
           # message(
           #   paste(
@@ -833,7 +824,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
             unlist() %>%
             unique() %>%
             .[1:(5-length(all_starters))]
-
+          
           # If able to find 5 players, return them as starter and warn user
           if(length(c(all_starters, all_half_players)) == 5) {
             message("Warning In Substitution Data - Not Enough Starters Found. Using Estimate")
@@ -843,12 +834,12 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
           }
         }
       } else {
-          away_starters[1:5]
+        away_starters[1:5]
       }
-
+      
       if(any(is.na(away_starters))){
         numb.players <- sum(is.na(away_starters))
-        half_using <- if(i ==1){4:(numbOTs+1)} else {1:i}
+        half_using <- if(i ==1){2:(numbOTs+1)} else {1:i}
         prior_half <- filter(dirty_game,
                              Half_Status %in% half_using,
                              Event_Team == Away,
@@ -862,24 +853,24 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
         away_starters[1:5][is.na(away_starters[1:5])] <- players
         message(paste("5 starters not found for half", i, "choosing", players, collapse = "/"))
       }
-
+      
       # Now an empty matrix is built that will be iterated through to store the lineups
       # Repeat process is done for home and away team
-
+      
       home_mat <- matrix(
-          c(home_starters,home_starters,rep(NA_character_, nrow(half_data) * 5 - 5)),
-          nrow = nrow(half_data) + 1, ncol = 5, byrow = T)
-
+        c(home_starters,home_starters,rep(NA_character_, nrow(half_data) * 5 - 5)),
+        nrow = nrow(half_data) + 1, ncol = 5, byrow = T)
+      
       away_mat <- matrix(
-          c(away_starters,away_starters,rep(NA_character_, nrow(half_data) * 5 - 5)),
-          nrow = nrow(half_data) + 1, ncol = 5, byrow = T)
-
+        c(away_starters,away_starters,rep(NA_character_, nrow(half_data) * 5 - 5)),
+        nrow = nrow(half_data) + 1, ncol = 5, byrow = T)
+      
       # Vectors of substitutes are used and diminished as events happen to track who is subbed
       home_exit_players <- if(length(home_leaving)>0){home_leaving}else{"HOPEFULLY THIS IS NOBODY'S NAME"}
       home_enter_players <- if(length(home_entering)>0){home_entering}else{"HOPEFULLY THIS IS NOBODY'S NAME"}
       away_exit_players <-  if(length(away_leaving)>0){away_leaving}else{"HOPEFULLY THIS IS NOBODY'S NAME"}
       away_enter_players <- if(length(away_entering)>0){away_entering}else{"HOPEFULLY THIS IS NOBODY'S NAME"}
-
+      
       # Go through each row of the data frame of events for each half
       for (k in 1:(nrow(half_data))) {
         #First case looks at if it is a home substitution and the player matches expectations (next in vector and already on court)
@@ -962,29 +953,29 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
         rbind(away_player_matrix, away_mat[-1,])
       ###END OF LOOP
     }
-
-
+    
+    
     # Player Cleaning ####
-
+    
     #Remove the first row as it is made up of NAs from nature of how it's structured
     home_player_matrix <- home_player_matrix[-1,]
     away_player_matrix <- away_player_matrix[-1,]
-
+    
     #Rename columns to denote players
     colnames(home_player_matrix) <-
       c("Home.1", "Home.2", "Home.3", "Home.4", "Home.5")
     colnames(away_player_matrix) <-
       c("Away.1", "Away.2", "Away.3", "Away.4", "Away.5")
-
+    
     #Adds these columns to a new play by play data frame
     mild_game <-
       dplyr::bind_cols(list(dirty_game, as.data.frame(home_player_matrix, row.names = F), as.data.frame(away_player_matrix, row.names = F))
-            )
-
+      )
+    
     #Add the event length variable which can often be helpful
     home_starters <- unlist(mild_game[1,23:27])
     away_starters <- unlist(mild_game[1,28:32])
-
+    
     #Can now put together final data frame
     clean_game <- mild_game %>%
       dplyr::mutate_if(is.factor, as.character) %>%
@@ -1018,12 +1009,12 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
         ),
         # Only call garbage time if <= 3 starters are in... note: Ben Falk / CTG uses 2
         Starter_Thresh = ((Home.1 %in% home_starters) + (Home.2 %in% home_starters) +
-          (Home.3 %in% home_starters) + (Home.4 %in% home_starters) + (Home.5 %in% home_starters) +
-          (Away.1 %in% away_starters) + (Away.2 %in% away_starters) + (Away.3 %in% away_starters) +
-          (Away.4 %in% away_starters) + (Away.5 %in% away_starters)) <= 3,
+                            (Home.3 %in% home_starters) + (Home.4 %in% home_starters) + (Home.5 %in% home_starters) +
+                            (Away.1 %in% away_starters) + (Away.2 %in% away_starters) + (Away.3 %in% away_starters) +
+                            (Away.4 %in% away_starters) + (Away.5 %in% away_starters)) <= 3,
         # If both thresholds are met we hit garbage time and stay in it
         isGarbageTime = cumsum(Garbage_Thresh*Starter_Thresh) >= 1
-        ) %>%
+      ) %>%
       dplyr::select(-Garbage_Thresh, -Starter_Thresh) %>%
       # Making fix so that the players on the court to start a possession are credited for the entire possession
       dplyr::group_by(Poss_Num) %>%
@@ -1040,7 +1031,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
         Away.5 = first(Away.5)
       ) %>%
       dplyr::ungroup()
-
+    
     # Final round of checking for data entry mistakes by scorekeeper
     # Look for if a player is said to do an event and they aren't on the court as determined above
     player_errors <- apply(clean_game, 1, function(x) {
@@ -1050,7 +1041,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
         return(F)
       }
     })
-
+    
     # Oftentimes these errors simply occur when event ordering gets mixed up by scorekeeper
     # I don't really think this should be framed as a true error, as they are deadball events
     # This isn't necessarily an error
@@ -1066,7 +1057,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
     # Provide a column for deviations, allowing user to filter pbp with too many errors
     clean_game$Sub_Deviate <- nrow(entry_mistakes)
     # Warns user of number of entry mistakes found - only report if significant
-
+    
     warn <- ifelse(nrow(entry_mistakes)>15, paste(nrow(entry_mistakes), "deviations"), "")
     source <- ifelse(isUrlRead, "web", "local")
     # Give user final message about the status of the game they've scraped
@@ -1075,7 +1066,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
     if(isUrlRead) {
       Sys.sleep(2)
     }
-
+    
     return(clean_game)
   }
 }
@@ -1110,9 +1101,14 @@ get_date_games = function (date = as.character(format(Sys.Date() - 1, "%m/%d/%Y"
                            conference = "All", conference.ID = NA, use_file = F, save_file = F, 
                            base_path = NA) 
 {
+  
   dateform <- as.Date(as.character(date), format = "%m/%d/%Y")
   seasonid <-
     dplyr::case_when(
+      dateform > as.Date("2024-05-01") & dateform <=
+        as.Date("2023-05-01") ~ 18423,
+      dateform > as.Date("2023-05-01") & dateform <=
+        as.Date("2024-05-01") ~ 18220,
       dateform > as.Date("2022-05-01") & dateform <=
         as.Date("2023-05-01") ~ 17941,
       dateform > as.Date("2021-05-01") & dateform <=
@@ -1152,62 +1148,97 @@ get_date_games = function (date = as.character(format(Sys.Date() - 1, "%m/%d/%Y"
   if (seasonid == 0) {
     return("Season Not Available")
   }
-  conferenceform <- tolower(sub("[^[:alnum:]=\\.]", "", conference))
-  conferenceid <- dplyr::case_when(conferenceform == "aac" ~ 
-                                     823, conferenceform == "acc" ~ 821, conferenceform == 
-                                     "asun" ~ 920, conferenceform == "americaneast" ~ 845, 
-                                   conferenceform == "atlantic10" ~ 820, conferenceform == 
-                                     "big12" ~ 25354, conferenceform == "bigeast" ~ 30184, 
-                                   conferenceform == "bigsky" ~ 825, conferenceform == 
-                                     "bigsouth" ~ 826, conferenceform %in% c("bigten", 
-                                                                             "big10") ~ 827, conferenceform == "bigwest" ~ 904, 
-                                   conferenceform == "cusa" ~ 24312, conferenceform == 
-                                     "caa" ~ 837, conferenceform == "horizon" ~ 881, 
-                                   conferenceform == "ivy" ~ 865, conferenceform == "maac" ~ 
-                                     871, conferenceform == "mac" ~ 875, conferenceform == 
-                                     "meac" ~ 876, conferenceform == "mvc" ~ 884, conferenceform == 
-                                     "mwc" ~ 5486, conferenceform == "nec" ~ 846, conferenceform == 
-                                     "ovc" ~ 902, conferenceform == "pac12" ~ 905, conferenceform == 
-                                     "patriot" ~ 838, conferenceform == "sec" ~ 911, 
-                                   conferenceform == "swac" ~ 916, conferenceform == "socon" ~ 
-                                     912, conferenceform == "southland" ~ 914, conferenceform == 
-                                     "summit" ~ 819, conferenceform == "sunbelt" ~ 818, 
-                                   conferenceform == "wac" ~ 923, conferenceform == "wcc" ~ 
-                                     922, conferenceform == "all" ~ 0, T ~ 99999999)
+  # If user doesn't know the conference id, they can enter a conference name
+  # The naming conventions are handled below and stripped of any case, spaces, punctuation, etc.
+  conferenceform <-
+    tolower(sub("[^[:alnum:]=\\.]", "", conference))
+  conferenceid <- dplyr::case_when(
+    conferenceform == "aac" ~ 823,
+    conferenceform == "acc" ~ 821,
+    conferenceform == "asun" ~ 920,
+    conferenceform == "americaneast" ~ 845,
+    conferenceform == "atlantic10" ~ 820,
+    conferenceform == "big12" ~ 25354,
+    conferenceform == "bigeast" ~ 30184,
+    conferenceform == "bigsky" ~ 825,
+    conferenceform == "bigsouth" ~ 826,
+    conferenceform %in% c("bigten", "big10") ~ 827,
+    conferenceform == "bigwest" ~ 904,
+    conferenceform == "cusa" ~ 24312,
+    conferenceform == "caa" ~ 837,
+    conferenceform == "horizon" ~ 881,
+    conferenceform == "ivy" ~ 865,
+    conferenceform == "maac" ~ 871,
+    conferenceform == "mac" ~ 875,
+    conferenceform == "meac" ~ 876,
+    conferenceform == "mvc" ~ 884,
+    conferenceform == "mwc" ~ 5486,
+    conferenceform == "nec" ~ 846,
+    conferenceform == "ovc" ~ 902,
+    conferenceform == "pac12" ~ 905,
+    conferenceform == "patriot" ~ 838,
+    conferenceform == "sec" ~ 911,
+    conferenceform == "swac" ~ 916,
+    conferenceform == "socon" ~ 912,
+    conferenceform == "southland" ~ 914,
+    conferenceform == "summit" ~ 819,
+    conferenceform == "sunbelt" ~ 818,
+    conferenceform == "wac" ~ 923,
+    conferenceform == "wcc" ~ 922,
+    conferenceform == "all" ~ 0,
+    T ~ 99999999
+  )
+  # When a bad entry is found return error
   if (conferenceid == 99999999) {
     message("Conference ID not found, using all")
+    # return(NA)
     conferenceid = 0
   }
+  # When the user gives their own conference ID, this replaces the text option
   if (!is.na(conference.ID)) {
     conferenceid = conference.ID
   }
+  
+  #formats date as found in the url
   date2 <- gsub("[/]", "%2F", date)
-  url_text <- paste0("http://stats.ncaa.org/season_divisions/", 
-                     seasonid, "/scoreboards?game_date=", date2, "&conference_id=", 
-                     conferenceid, "&commit=Submit")
+  
+  #pulls the necessary url
+  url_text <-
+    paste0(
+      "https://stats.ncaa.org/season_divisions/",
+      seasonid,
+      "/scoreboards?game_date=",
+      date2,
+      "&conference_id=",
+      conferenceid,
+      "&commit=Submit"
+    )
   file_dir <- paste0(base_path, "date_games/")
-  file_path <- paste0(file_dir, date2, "_", conferenceid, 
-                      ".html")
+  file_path <- paste0(file_dir, date2, "_", conferenceid, ".html")
+  
+  # Give user option to save raw html file (to make future processing more efficient)
   if (save_file & !is.na(base_path)) {
-    file_url <- url(url_text, headers = c(`User-Agent` = "My Custom User Agent"))
-    html <- readLines(con = file_url, warn = F)
+    file_url <- url(url_text, headers = c("User-Agent" = "My Custom User Agent"))
+    html <- readLines(con = file_url, warn=F)
     close(file_url)
+    
     dir.create(file_dir, recursive = T, showWarnings = F)
     writeLines(html, file_path)
   }
+  
+  # Reads the html and pulls the table holding the scores
   if (use_file & !is.na(base_path)) {
-    html <- readLines(file_path, warn = F)
-  }
-  else {
-    file_url <- url(url_text, headers = c(`User-Agent` = "My Custom User Agent"))
-    html <- readLines(con = file_url, warn = F)
+    html <- readLines(file_path, warn=F)
+  } else {
+    file_url <- url(url_text, headers = c("User-Agent" = "My Custom User Agent"))
+    html <- readLines(con = file_url, warn=F)
     close(file_url)
   }
+  
   table <- XML::readHTMLTable(html)
-  if (length(table) == 0) {
+  if(length(table) == 0) {
     stop("No Games Table Found")
-  }
-  else {
+  } else {
     table <- table[[1]]
   }
   
@@ -1248,14 +1279,18 @@ get_date_games = function (date = as.character(format(Sys.Date() - 1, "%m/%d/%Y"
   # Need to read each box score page and find link to pbp page
   
   url2 <-
-    paste0("http://stats.ncaa.org/contests/", id_found, "/box_score")
+    paste0("https://stats.ncaa.org/contests/", id_found, "/box_score")
   
-  # Clean team names
-  home_name = gsub(" [(].*[)]","", home_team)
+  # Clean team names (remove records, like "Rutgers (1-0)")
+  # home_name = gsub(" [(][0-9]{1-2}\\-[0-9]{1-2}[)]","", home_team)
+  home_name = gsub(" \\([0-9].+","", home_team) |>
+    gsub(pattern = '\\#[0-9]{1,2} ', replacement = "")
   home_wins = as.vector(stringr::str_extract_all(home_team, "(?<=[(])\\d+(?=-)", T))
   home_losses = as.vector(stringr::str_extract_all(home_team, "(?<=-)\\d+(?=[)])", T))
   
-  away_name = gsub(" [(].*[)]","", away_team)
+  # away_name = gsub(" [(][0-9]{1-2}\\-[0-9]{1-2}[)]","", away_team)
+  away_name = gsub(" \\([0-9].+","", away_team) |>
+    gsub(pattern = '\\#[0-9]{1,2} ', replacement = "")
   away_wins = as.vector(stringr::str_extract_all(away_team, "(?<=[(])\\d+(?=-)", T))
   away_losses = as.vector(stringr::str_extract_all(away_team, "(?<=-)\\d+(?=[)])", T))
   
@@ -1271,7 +1306,7 @@ get_date_games = function (date = as.character(format(Sys.Date() - 1, "%m/%d/%Y"
     Home = home_name,
     Away = away_name,
     BoxID = id_found,
-    GameID = NA,
+    GameID = id_found,
     Home_Score = home_score,
     Away_Score = away_score,
     Attendance = attendance,
@@ -1285,42 +1320,7 @@ get_date_games = function (date = as.character(format(Sys.Date() - 1, "%m/%d/%Y"
     row.names = NULL
   )
   
-  # Have to iterate through every game for the given day and find all play by play ids on the box score page
-  if(length(id_found)>0){
-    pb = txtProgressBar(min = 0, max = length(id_found), initial = 0)
-    for (i in 1:length(id_found)) {
-      if(url2[i] !=  "http://stats.ncaa.org/contests/NA/box_score") {
-        file_dir <- paste0(base_path, "box_score/")
-        file_path <- paste0(file_dir, id_found[i], ".html")
-        isUrlRead <- F
-        
-        # Assumes that if pbp is available from file it will always be used rather than re-scraping
-        if (!is.na(base_path) & file.exists(file_path)) {
-          temp_html <- readLines(file_path, warn=F)
-        } else {
-          isUrlRead <- T
-          file_url <- url(url2[i], headers = c("User-Agent" = "My Custom User Agent"))
-          temp_html <- readLines(con = file_url, warn=F)
-          close(file_url)
-        }
-        
-        # Give user option to save raw html file (to make future processing more efficient)
-        if (save_file & !is.na(base_path) & !file.exists(file_path)) {
-          dir.create(file_dir, recursive = T, showWarnings = F)
-          writeLines(temp_html, file_path)
-        }
-        
-        new_id <- unlist(stringr::str_extract(temp_html, "(?<=play_by_play/)\\d+"))
-        new_id <- unique(new_id[!is.na(new_id)])
-        game_data$GameID[i] <- new_id
-        if(isUrlRead) {
-          Sys.sleep(0.5)
-        }
-        setTxtProgressBar(pb,i)
-      }
-    }
-    close(pb)
-  } else {
+  if(length(id_found)==0){
     message("No Game IDs Found")
   }
   
@@ -1353,26 +1353,28 @@ get_date_games = function (date = as.character(format(Sys.Date() - 1, "%m/%d/%Y"
 #' get_team_schedule(team.id = 484200, team.name = "Penn")
 get_team_schedule <-
   function(team.id = NA,
-           team.name = NA,
            season = NA,
+           team.name = NA,
            use_file = F,
            save_file = F,
            base_path = NA,
            overwrite = F) {
+    
     # If the user doesn't know id and instead gives a team name and season searches team DB for ID
+    # This can only be done since 16-17 at the moment
     if (is.na(team.id) & !is.na(team.name) & !is.na(season)) {
       team.id <-
-        wbigballR::teamids$ID[which(wbigballR::teamids$Team == team.name & wbigballR::teamids$Season == season)]
+        bigballR::teamids$ID[which(bigballR::teamids$Team == team.name & bigballR::teamids$Season == season)]
     } else if(is.na(team.id) & is.na(team.name) & is.na(season)){
       message("Improper Request")
       return(NULL)
     }
-
+    
     # Pull the relevant table from the team webpage
-    url_text <- paste0("http://stats.ncaa.org/teams/", team.id)
+    url_text <- paste0("https://stats.ncaa.org/teams/", team.id)
     file_dir <- paste0(base_path, "team_schedule/")
     file_path <- paste0(file_dir, team.id, ".html")
-
+    
     if (save_file & !is.na(base_path) & (!file.exists(file_path) | overwrite)) {
       isUrlRead <- T
       file_url <- url(url_text, headers = c("User-Agent" = "My Custom User Agent"))
@@ -1388,63 +1390,30 @@ get_team_schedule <-
       html <- readLines(con = file_url, warn=F)
       close(file_url)
     }
-
+    
     tables <- XML::readHTMLTable(html)
-    if(!is.null(tables[[2]])) {
-      df <- data.frame(as.matrix(tables[[2]]), stringsAsFactors = F)
+    if(!is.null(tables[[1]])) {
+      df <- data.frame(as.matrix(tables[[1]]), stringsAsFactors = F)
     } else {
       message(paste(team.id, "has no schedule"))
       return(data.frame())
     }
-
-
-    #New
+    
     df <- df[seq(1,nrow(df), by = 2),]
-
+    df <- df[!is.na(df$Opponent),]
+    
+    # fix strings like "Campbell 2022-23 MBB App State MTE" and "UC Santa Barbara @Phoenix, AZ (2022-23 MBB Jerry Colangelo Classic)"
+    df$Opponent_with_detail <- df$Opponent |>
+      str_remove(" 202.*$")
+    # Keep two different versions: df$Opponent_with_detail includes neutral site descriptions,
+    # df$Opponent does not.
+    df$Opponent <- df$Opponent_with_detail |>
+      str_remove(" \\@[A-Z].*$")
+    
+    
     game_ids <-
       unlist(stringr::str_extract_all(html, "(?<=contests/)\\d+(?=[/])"))
-
-    # Game IDs links to box score game id, not play by play id
-    # Unfortunately need to now parse webpage for each game played to find game id
-    url2 <-
-      paste0("http://stats.ncaa.org/contests/", game_ids, "/box_score")
-
-    new_ids <- c()
-    message("Compiling Game IDs")
-    pb = txtProgressBar(min = 0, max = length(url2), initial = 0)
-
-    # Have to iterate through every game for the given day and find all play by play ids on the box score page
-    for (i in 1:length(url2)) {
-      file_dir <- paste0(base_path, "box_score/")
-      file_path <- paste0(file_dir, game_ids[i], ".html")
-      isUrlRead <- F
-
-      # Assumes that if pbp is available from file it will always be used rather than re-scraping
-      if (!is.na(base_path) & file.exists(file_path)) {
-        temp_html <- readLines(file_path, warn=F)
-      } else {
-        isUrlRead <- T
-        file_url <- url(url2[i], headers = c("User-Agent" = "My Custom User Agent"))
-        temp_html <- readLines(con = file_url, warn=F)
-        close(file_url)
-      }
-
-      # Give user option to save raw html file (to make future processing more efficient)
-      if (save_file & !is.na(base_path) & !file.exists(file_path)) {
-        dir.create(file_dir, recursive = T, showWarnings = F)
-        writeLines(temp_html, file_path)
-      }
-
-      new_id <- unlist(stringr::str_extract(temp_html, "(?<=play_by_play[/])\\d+"))
-      new_id <- unique(new_id[!is.na(new_id)])
-      new_ids <- c(new_ids,new_id)
-      if (isUrlRead) {
-        Sys.sleep(0.5)
-      }
-      setTxtProgressBar(pb,i)
-    }
-
-    close(pb)
+    
     message("\nParsing Schedule")
     # Handle opponent and neutral games as both are broken up using an '@' character
     parsed <- lapply(df$Opponent, strsplit, "@")
@@ -1452,39 +1421,58 @@ get_team_schedule <-
       x <- unlist(x)
       t <- stringr::str_extract(x, "(?<=[\\#[0-9]+] ).*")
       t[is.na(t)] <- x[is.na(t)]
-      if(!any(trimws(t) %in% wbigballR::teamids$Team)) {
+      if(!any(trimws(t) %in% bigballR::teamids$Team)) {
         for(j in 1:length(t)) {
           i <- 1
-          while (!substr(t[j], 1, i) %in% wbigballR::teamids$Team && i <= nchar(t[j])) {
+          while (!substr(t[j], 1, i) %in% bigballR::teamids$Team && i <= nchar(t[j])) {
             i <- i + 1
           }
           t[j] = substr(t[j], 1, i)
         }
       }
-
+      
       return(t)
     })
-
-
+    
+    # Use df$Opponent_with_detail to get neutral site information
+    parsed_detail <- lapply(df$Opponent_with_detail, strsplit, "@")
+    parsed_detail <- lapply(parsed_detail, function(x) {
+      x <- unlist(x)
+      t <- stringr::str_extract(x, "(?<=[\\#[0-9]+] ).*")
+      t[is.na(t)] <- x[is.na(t)]
+      if(!any(trimws(t) %in% bigballR::teamids$Team)) {
+        for(j in 1:length(t)) {
+          i <- 1
+          while (!substr(t[j], 1, i) %in% bigballR::teamids$Team && i <= nchar(t[j])) {
+            i <- i + 1
+          }
+          t[j] = substr(t[j], 1, i)
+        }
+      }
+      
+      return(t)
+    })
+    
+    
     # Pulls the opponent if they are the home team
     Home <-
       lapply(parsed, function(x) {
         if (x[1] == "" & !is.na(x[2]))
           return(x[2])
       })
-
+    
     # Searches for neutral game and gets location
     Neutral <-
-      lapply(parsed, function(x) {
+      lapply(parsed_detail, function(x) {
         if (length(x) == 2 & x[1] != "")
           return(x[2])
-
+        
       })
-
+    
     #Iterate through games and finds the home and away team
     home_team <- rep(NA, length(parsed))
     away_team <- rep(NA, length(parsed))
-    is_neutral <- rep(F, length(parsed))
+    is_neutral <- rep(F, length(parsed_detail))
     for (i in 1:length(parsed)) {
       if (!is.null(Home[[i]])) {
         home_team[i] <- trimws(Home[[i]])
@@ -1496,11 +1484,10 @@ get_team_schedule <-
         is_neutral[i] <- T
       }
     }
-
-    team_name <- wbigballR::teamids$Team[which(wbigballR::teamids$ID == team.id)]
-
+    
+    team_name <- bigballR::teamids$Team[which(bigballR::teamids$ID == team.id)]
+    
     #This cleans the score information
-    # score <- strsplit(df$Result, " - ") old
     score <- strsplit(df$Result, "-")
     selected_score <-
       trimws(gsub("W", "", gsub("L", "", sapply(score, function(x) {
@@ -1516,15 +1503,16 @@ get_team_schedule <-
     opponent_score <-
       unname(sapply(opponent_score, function(x)
         strsplit(x, " \\(")[[1]][1]))
-
+    
     detail <- ifelse(selected_score %in% c("Canceled", "Ppd"), selected_score, detail)
     selected_score <- ifelse(selected_score %in% c("Canceled", "Ppd"), NA, selected_score)
-
-    pbp_ids <- selected_score
-    pbp_ids[which(!is.na(pbp_ids))] <- if(length(new_ids)>0) new_ids else NA
-    box_ids <- selected_score
-    box_ids[which(!is.na(box_ids))] <- if(length(game_ids)>0) game_ids else NA
-
+    
+    # add NA game_ids for cancelled games
+    new_game_ids <- rep(NA, nrow(df))
+    if (length(game_ids) > 0) {
+      new_game_ids[is.na(detail) | detail != 'Canceled'][1:length(game_ids)] <- game_ids
+    }
+    
     #Put everything together into tidy data frame
     team_data <- data.frame(
       Date = df$Date,
@@ -1532,33 +1520,37 @@ get_team_schedule <-
       Home_Score = ifelse(!is.na(home_team), opponent_score, selected_score),
       Away = ifelse(!is.na(away_team), away_team, team_name),
       Away_Score = ifelse(!is.na(away_team), opponent_score, selected_score),
-      Game_ID = pbp_ids,
-      Box_ID = box_ids,
+      Box_ID = new_game_ids,
+      Game_ID = new_game_ids,
       isNeutral = is_neutral,
       Detail = detail,
+      Attendance = as.numeric(gsub(",", "", df$Attendance)),
       stringsAsFactors = F
     )
     #Replace blank portions of schedule with dashes, as that is used on NCAA site but NA is better for this purpose
     team_data[team_data == "-"] <- NA
-
+    
     #Give user final status update and returns the df
     message(paste0(
       team_name[1],
-      " complete--",
+      " complete -- ",
       nrow(team_data),
       "/",
       length(game_ids),
-      " | games/ids found"
+      " games/ids found"
     ))
-
+    
     return(team_data)
-}
+  }
+
 
 #' Team Roster Scrape
 #'
 #' This function returns a data frame of the roster for the specified team. This will include player names and positions
 #' as well as jersey number, height and school year.
 #' @param team.id The unique id given to each college/team for each season. This can be found in the url of the team page.
+#' @param season Alternative to using the id, you can get a team from data(teamids) with a season and team name specification.
+#' String for the season stored as yyy1-y2 (2018-19 is current)
 #' @param team.name Alternative to using the id, you can get a team from data(teamids) with a season and team name specification.
 #' This inputs a team name, to be used along with season. This needs the school name not the complete team name, so "Duke" not "Duke Blue Devils".
 #' @importFrom XML readHTMLTable
@@ -1579,28 +1571,29 @@ get_team_schedule <-
 
 get_team_roster <-
   function(team.id = NA,
-           team.name = NA,
            season = NA,
+           team.name = NA,
            use_file = F,
            save_file = F,
            base_path = NA,
            overwrite = F) {
     
     # If the user doesn't know id and instead gives a team name and season searches team DB for ID
+    # This can only be done since 16-17 at the moment
     if (is.na(team.id) & !is.na(team.name) & !is.na(season)) {
       team.id <-
-        wbigballR::teamids$ID[which(wbigballR::teamids$Team == team.name & wbigballR::teamids$Season == season)]
+        bigballR::teamids$ID[which(bigballR::teamids$Team == team.name & bigballR::teamids$Season == season)]
     } else if(is.na(team.id) & is.na(team.name) & is.na(season)){
       message("Improper Request")
       return(NULL)
     }
-
+    
     #Pull html for the team page
-    url_text <- paste0("http://stats.ncaa.org/teams/", team.id)
+    url_text <- paste0("https://stats.ncaa.org/teams/", team.id)
     file_dir <- paste0(base_path, "team_schedule/")
     file_path <- paste0(file_dir, team.id, ".html")
     isUrlRead <- F
-
+    
     # Give user option to save raw html file (to make future processing more efficient)
     if (save_file & !is.na(base_path) & (!file.exists(file_path) | overwrite)) {
       isUrlRead <- T
@@ -1617,17 +1610,20 @@ get_team_roster <-
       html <- readLines(con = file_url, warn=F)
       close(file_url)
     }
-
+    
     #Find link to the team roster page
     roster_link <- html[which(grepl("Roster", html))]
     roster_link <-
       stringr::str_extract_all(roster_link, "(?<=\\\")(.*)(?=[\\\"])")
-    roster_url <- paste0("http://stats.ncaa.org", roster_link)
+    roster_url <- paste0("https://stats.ncaa.org", roster_link)
+    roster_url <- paste0("https://stats.ncaa.org/teams/", team.id, "/roster")
+    
+    
     #Read html for the roster page and format it so it can be usabl
-
+    
     file_dir <- paste0(base_path, "team_roster/")
     file_path <- paste0(file_dir, team.id, ".html")
-
+    
     if (save_file & !is.na(base_path) & (!file.exists(file_path) | overwrite)) {
       isUrlRead <- T
       file_url <- url(roster_url, headers = c("User-Agent" = "My Custom User Agent"))
@@ -1643,29 +1639,29 @@ get_team_roster <-
       html <- readLines(con = file_url, warn=F)
       close(file_url)
     }
-
-    table <- XML::readHTMLTable(html)[[1]][, 1:5] %>%
+    
+    table <- XML::readHTMLTable(html)[[1]][, 1:9] %>%
       mutate(across(everything(), as.character))
     # Return the more usable roster page
-    player <- table$Player
-    clean_name <- sapply(strsplit(player, ","), function(x){trimws(paste(x[length(x)],x[1]))})
+    player <- table$Name
+    clean_name <- player
     format <- gsub("[^[:alnum:] ]", "", clean_name)
     format <- toupper(gsub("\\s+",".", format))
     player_name <- gsub("(\\.JR\\.|\\.SR\\.|\\.J\\.R\\.|\\.JR\\.|JR\\.|SR\\.|\\.SR|\\.JR|\\.SR|\\.III|\\.II|\\.IV)$","", format)
     player_name <- trimws(player_name)
-
+    
     table$Player <- player_name
     table$CleanName <- clean_name
-    table$HtInches <- unname(sapply(table$Ht, function(x){
+    table$HtInches <- unname(sapply(table$Height, function(x){
       a = as.numeric(strsplit(x,"-")[[1]])
       12*a[1] + a[2]
     }))
-
+    
     if (isUrlRead) {
       Sys.sleep(0.5)
     }
-  return(table)
-}
+    return(table)
+  }
 
 #' Multiple Game Play-By-Play Scraper
 #'
@@ -1681,7 +1677,7 @@ get_play_by_play <- function(game_ids, use_file = F, save_file = F, base_path = 
   #Cleans list of game ids to remove nas
   game_ids <- game_ids[!is.na(game_ids)]
   #Scrape all game ids into list
-
+  
   game_list <- lapply(game_ids, function(x) {
     # Add error handling so if one game throws an error it will report and continue iterating
     tryCatch(scrape_game(x, use_file = use_file, save_file = save_file, base_path = base_path, overwrite=overwrite), error = function(e){
@@ -1689,7 +1685,7 @@ get_play_by_play <- function(game_ids, use_file = F, save_file = F, base_path = 
       return(NA)
     })
   })
-
+  
   dirty_ind <- which(is.na(game_list))
   #Remove any incorrect games found
   if(length(dirty_ind) > 0) game_list <- game_list[-dirty_ind]
@@ -1698,7 +1694,7 @@ get_play_by_play <- function(game_ids, use_file = F, save_file = F, base_path = 
   if(length(dirty_ind) != 0) {
     message(paste(paste(game_ids[dirty_ind], collapse = ","), "removed"))
   }
-
+  
   return(game_data)
 }
 
@@ -1752,11 +1748,11 @@ get_lineups <-
   function(play_by_play_data = NA, include_transition = F) {
     missing_rows <- apply(play_by_play_data[,which(colnames(play_by_play_data)=="Home.1"):which(colnames(play_by_play_data)=="Away.5")], 1, function(x){sum(is.na(x))})
     message(paste("Forced to remove", length(which(missing_rows!=0)), "rows due to missing players in on/off"))
-
+    
     lineup_stuff <- play_by_play_data %>%
       dplyr::filter(missing_rows==0) %>%
       dplyr::filter(!Event_Type %in% c("Enters Game", "Leaves Game"))
-
+    
     # Now sorts the home and away player alphabetically so players are always in the same column for a given lineup
     lineup_stuff2 <- apply(lineup_stuff, 1, function(x)
     {
@@ -1764,93 +1760,93 @@ get_lineups <-
       away_players <- sort(x[which(colnames(lineup_stuff)=="Away.1"):which(colnames(lineup_stuff)=="Away.5")])
       return(c(x[1:(which(colnames(lineup_stuff)=="Home.1")-1)], home_players, away_players, x[(which(colnames(lineup_stuff)=="Away.5")+1):ncol(lineup_stuff)]))
     })
-
+    
     #Converts the sorted back into a data frame
     lineup_stuff2 <-
       data.frame(matrix(unlist(lineup_stuff2), ncol = ncol(lineup_stuff), byrow = T), stringsAsFactors = F)
-
+    
     colnames(lineup_stuff2) <- colnames(play_by_play_data)
-
+    
     #Get all home lineups and calculate a variety of stats for each lineup
     #o is used to denote opponents
     suppressMessages(
-    home_lineups <- lineup_stuff2 %>%
-      dplyr::group_by(Home.1, Home.2, Home.3, Home.4, Home.5, Home) %>%
-      dplyr::mutate(Shot_Value = as.numeric(Shot_Value),
-             Event_Length = as.numeric(Event_Length),
-             Poss_Num = as.numeric(Poss_Num),
-             oPOSS = ifelse(Poss_Team == Home, as.numeric(paste0(ID,Poss_Num)), NA),
-             dPOSS = ifelse(Poss_Team == Away, as.numeric(paste0(ID,Poss_Num)), NA)
-             ) %>%
-      dplyr::summarise(
-        #can sum event lengths to get total amount of time across entries
-        Mins = sum(Event_Length, na.rm = T)/60,
-        oMins = sum(Event_Length * !is.na(oPOSS), na.rm = T)/60,
-        dMins = sum(Event_Length * !is.na(dPOSS), na.rm = T)/60,
-        # Get total possessions by the count of distinct possession numbers
-        oPOSS = dplyr::n_distinct(oPOSS, na.rm = T),
-        dPOSS = dplyr::n_distinct(dPOSS, na.rm = T),
-        #points
-        PTS = sum(
-          (Event_Team == Home) * (Event_Result == "made") * Shot_Value, na.rm = T),
-        dPTS = sum(
-          (Event_Team == Away) * (Event_Result == "made") * Shot_Value, na.rm = T),
-        #field goal attempts
-        FGA = sum((Shot_Value %in% c(2, 3)) * (Event_Team == Home) * 1, na.rm = T),
-        dFGA = sum((Shot_Value %in% c(2, 3)) * (Event_Team == Away) * 1, na.rm = T),
-        #field goal makes
-        FGM = sum((Shot_Value %in% c(2, 3)) * (Event_Team == Home) * (Event_Result == "made") * 1, na.rm = T),
-        dFGM = sum((Shot_Value %in% c(2, 3)) * (Event_Team == Away) * (Event_Result == "made") * 1, na.rm = T),
-        #three point attempts
-        TPA = sum((Shot_Value == 3) * (Event_Team == Home) * 1, na.rm = T),
-        dTPA = sum((Shot_Value == 3) * (Event_Team == Away) * 1, na.rm = T),
-        #three point makes
-        TPM = sum((Shot_Value == 3) * (Event_Team == Home) * (Event_Result == "made") * 1, na.rm = T),
-        dTPM = sum((Shot_Value == 3) * (Event_Team == Away) * (Event_Result == "made") * 1, na.rm = T),
-        #free throw attempts
-        FTA = sum((Shot_Value == 1) * (Event_Team == Home) * 1, na.rm = T),
-        dFTA = sum((Shot_Value == 1) * (Event_Team == Away) * 1, na.rm = T),
-        #free throw makes
-        FTM = sum((Shot_Value == 1) * (Event_Team == Home) * (Event_Result == "made") * 1, na.rm = T),
-        dFTM = sum((Shot_Value == 1) * (Event_Team == Away) * (Event_Result == "made") * 1, na.rm = T),
-        #rough estimate of rim attempts using terminology of ncaa
-        RIMA = sum((
-          Event_Type %in% c("Dunk", "Layup", "Hook", "Tip-In")
-        ) * (Event_Team == Home) * 1, na.rm = T),
-        dRIMA = sum((
-          Event_Type %in% c("Dunk", "Layup", "Hook", "Tip-In")
-        ) * (Event_Team == Away) * 1, na.rm = T),
-        RIMM = sum((Event_Result == "made") * (
-          Event_Type %in% c("Dunk", "Layup", "Hook", "Tip-In")
-        ) * (Event_Team == Home) * 1, na.rm = T),
-        dRIMM = sum((Event_Result == "made") * (
-          Event_Type %in% c("Dunk", "Layup", "Hook", "Tip-In")
-        ) * (Event_Team == Away) * 1, na.rm = T),
-        #offensive rebounds
-        ORB = sum((Event_Type == "Offensive Rebound") * (Event_Team == Home) * 1, na.rm = T),
-        dORB = sum((Event_Type == "Offensive Rebound") * (Event_Team == Away) * 1, na.rm = T),
-        #defensive rebounds
-        DRB = sum((Event_Type == "Defensive Rebound") * (Event_Team == Home) * 1, na.rm = T),
-        dDRB = sum((Event_Type == "Defensive Rebound") * (Event_Team == Away) * 1, na.rm = T),
-        #blocked shots
-        BLK = sum((Event_Type == "Blocked Shot") * (Event_Team == Home) * 1, na.rm = T),
-        dBLK = sum((Event_Type == "Blocked Shot") * (Event_Team == Away) * 1, na.rm = T),
-        #turnovers
-        TO = sum((Event_Type == "Turnover") * (Event_Team == Home) * 1, na.rm = T),
-        dTO = sum((Event_Type == "Turnover") * (Event_Team == Away) * 1, na.rm = T),
-        #assists
-        AST = sum((!is.na(Player_2)) * (Event_Team == Home) * 1, na.rm = T),
-        dAST =  sum((!is.na(Player_2)) * (Event_Team == Away) * 1, na.rm = T)
-      ) %>%
-      dplyr::rename(
-        P1 = Home.1,
-        P2 = Home.2,
-        P3 = Home.3,
-        P4 = Home.4,
-        P5 = Home.5,
-        Team = Home
-      ))
-
+      home_lineups <- lineup_stuff2 %>%
+        dplyr::group_by(Home.1, Home.2, Home.3, Home.4, Home.5, Home) %>%
+        dplyr::mutate(Shot_Value = as.numeric(Shot_Value),
+                      Event_Length = as.numeric(Event_Length),
+                      Poss_Num = as.numeric(Poss_Num),
+                      oPOSS = ifelse(Poss_Team == Home, as.numeric(paste0(ID,Poss_Num)), NA),
+                      dPOSS = ifelse(Poss_Team == Away, as.numeric(paste0(ID,Poss_Num)), NA)
+        ) %>%
+        dplyr::summarise(
+          #can sum event lengths to get total amount of time across entries
+          Mins = sum(Event_Length, na.rm = T)/60,
+          oMins = sum(Event_Length * !is.na(oPOSS), na.rm = T)/60,
+          dMins = sum(Event_Length * !is.na(dPOSS), na.rm = T)/60,
+          # Get total possessions by the count of distinct possession numbers
+          oPOSS = dplyr::n_distinct(oPOSS, na.rm = T),
+          dPOSS = dplyr::n_distinct(dPOSS, na.rm = T),
+          #points
+          PTS = sum(
+            (Event_Team == Home) * (Event_Result == "made") * Shot_Value, na.rm = T),
+          dPTS = sum(
+            (Event_Team == Away) * (Event_Result == "made") * Shot_Value, na.rm = T),
+          #field goal attempts
+          FGA = sum((Shot_Value %in% c(2, 3)) * (Event_Team == Home) * 1, na.rm = T),
+          dFGA = sum((Shot_Value %in% c(2, 3)) * (Event_Team == Away) * 1, na.rm = T),
+          #field goal makes
+          FGM = sum((Shot_Value %in% c(2, 3)) * (Event_Team == Home) * (Event_Result == "made") * 1, na.rm = T),
+          dFGM = sum((Shot_Value %in% c(2, 3)) * (Event_Team == Away) * (Event_Result == "made") * 1, na.rm = T),
+          #three point attempts
+          TPA = sum((Shot_Value == 3) * (Event_Team == Home) * 1, na.rm = T),
+          dTPA = sum((Shot_Value == 3) * (Event_Team == Away) * 1, na.rm = T),
+          #three point makes
+          TPM = sum((Shot_Value == 3) * (Event_Team == Home) * (Event_Result == "made") * 1, na.rm = T),
+          dTPM = sum((Shot_Value == 3) * (Event_Team == Away) * (Event_Result == "made") * 1, na.rm = T),
+          #free throw attempts
+          FTA = sum((Shot_Value == 1) * (Event_Team == Home) * 1, na.rm = T),
+          dFTA = sum((Shot_Value == 1) * (Event_Team == Away) * 1, na.rm = T),
+          #free throw makes
+          FTM = sum((Shot_Value == 1) * (Event_Team == Home) * (Event_Result == "made") * 1, na.rm = T),
+          dFTM = sum((Shot_Value == 1) * (Event_Team == Away) * (Event_Result == "made") * 1, na.rm = T),
+          #rough estimate of rim attempts using terminology of ncaa
+          RIMA = sum((
+            Event_Type %in% c("Dunk", "Layup", "Hook", "Tip-In")
+          ) * (Event_Team == Home) * 1, na.rm = T),
+          dRIMA = sum((
+            Event_Type %in% c("Dunk", "Layup", "Hook", "Tip-In")
+          ) * (Event_Team == Away) * 1, na.rm = T),
+          RIMM = sum((Event_Result == "made") * (
+            Event_Type %in% c("Dunk", "Layup", "Hook", "Tip-In")
+          ) * (Event_Team == Home) * 1, na.rm = T),
+          dRIMM = sum((Event_Result == "made") * (
+            Event_Type %in% c("Dunk", "Layup", "Hook", "Tip-In")
+          ) * (Event_Team == Away) * 1, na.rm = T),
+          #offensive rebounds
+          ORB = sum((Event_Type == "Offensive Rebound") * (Event_Team == Home) * 1, na.rm = T),
+          dORB = sum((Event_Type == "Offensive Rebound") * (Event_Team == Away) * 1, na.rm = T),
+          #defensive rebounds
+          DRB = sum((Event_Type == "Defensive Rebound") * (Event_Team == Home) * 1, na.rm = T),
+          dDRB = sum((Event_Type == "Defensive Rebound") * (Event_Team == Away) * 1, na.rm = T),
+          #blocked shots
+          BLK = sum((Event_Type == "Blocked Shot") * (Event_Team == Home) * 1, na.rm = T),
+          dBLK = sum((Event_Type == "Blocked Shot") * (Event_Team == Away) * 1, na.rm = T),
+          #turnovers
+          TO = sum((Event_Type == "Turnover") * (Event_Team == Home) * 1, na.rm = T),
+          dTO = sum((Event_Type == "Turnover") * (Event_Team == Away) * 1, na.rm = T),
+          #assists
+          AST = sum((!is.na(Player_2)) * (Event_Team == Home) * 1, na.rm = T),
+          dAST =  sum((!is.na(Player_2)) * (Event_Team == Away) * 1, na.rm = T)
+        ) %>%
+        dplyr::rename(
+          P1 = Home.1,
+          P2 = Home.2,
+          P3 = Home.3,
+          P4 = Home.4,
+          P5 = Home.5,
+          Team = Home
+        ))
+    
     # Now calculate optional half-court + transition
     if(include_transition) {
       suppressMessages(
@@ -1923,7 +1919,7 @@ get_lineups <-
             #assists
             AST_trans = sum((!is.na(Player_2)) * (Event_Team == Home) * isTransition, na.rm = T),
             dAST_trans =  sum((!is.na(Player_2)) * (Event_Team == Away) * isTransition, na.rm = T),
-          #HALF COURT
+            #HALF COURT
             Mins_half = sum(Event_Length * isHalfCourt, na.rm = T)/60,
             oMins_half = sum(Event_Length * (!is.na(oPOSS_num)*1) * isHalfCourt, na.rm = T)/60,
             dMins_half = sum(Event_Length * (!is.na(dPOSS_num)*1) * isHalfCourt, na.rm = T)/60,
@@ -1976,71 +1972,71 @@ get_lineups <-
             P5 = Home.5,
             Team = Home
           )
-          )
+      )
     }
-
+    
     #same done for away team
     suppressMessages(
-    away_lineups <- lineup_stuff2 %>%
-      dplyr::group_by(Away.1, Away.2, Away.3, Away.4, Away.5, Away) %>%
-      dplyr::mutate(Shot_Value = as.numeric(Shot_Value),
-             Event_Length = as.numeric(Event_Length),
-             Poss_Num = as.numeric(Poss_Num),
-             oPOSS_num = ifelse(Poss_Team == Away, as.numeric(paste0(ID,Poss_Num)), NA),
-             dPOSS_num = ifelse(Poss_Team == Home, as.numeric(paste0(ID,Poss_Num)), NA)
-             ) %>%
-      dplyr::summarise(
-        Mins = sum(Event_Length / 60, na.rm = T),
-        oMins = sum(Event_Length * !is.na(oPOSS_num), na.rm = T)/60,
-        dMins = sum(Event_Length * !is.na(dPOSS_num), na.rm = T)/60,
-        oPOSS = dplyr::n_distinct(oPOSS_num, na.rm = T),
-        dPOSS = dplyr::n_distinct(dPOSS_num, na.rm = T),
-        PTS = sum((Event_Team == Away) * (Event_Result == "made") * Shot_Value, na.rm = T),
-        dPTS = sum((Event_Team == Home) * (Event_Result == "made") * Shot_Value,na.rm = T),
-        FGA = sum((Shot_Value %in% c(2, 3)) * (Event_Team == Away) * 1, na.rm = T),
-        dFGA = sum((Shot_Value %in% c(2, 3)) * (Event_Team == Home) * 1, na.rm = T),
-        FGM = sum((Shot_Value %in% c(2, 3)) * (Event_Team == Away) * (Event_Result == "made") * 1, na.rm = T),
-        dFGM = sum((Shot_Value %in% c(2, 3)) * (Event_Team == Home) * (Event_Result == "made") * 1, na.rm = T),
-        TPA = sum((Shot_Value == 3) * (Event_Team == Away) * 1, na.rm = T),
-        dTPA = sum((Shot_Value == 3) * (Event_Team == Home) * 1, na.rm = T),
-        TPM = sum((Shot_Value == 3) * (Event_Team == Away) * (Event_Result == "made") * 1, na.rm = T),
-        dTPM = sum((Shot_Value == 3) * (Event_Team == Home) * (Event_Result == "made") * 1, na.rm = T),
-        FTA = sum((Shot_Value == 1) * (Event_Team == Away) * 1, na.rm = T),
-        dFTA = sum((Shot_Value == 1) * (Event_Team == Home) * 1, na.rm = T),
-        FTM = sum((Shot_Value == 1) * (Event_Team == Away) * (Event_Result == "made") * 1, na.rm = T),
-        dFTM = sum((Shot_Value == 1) * (Event_Team == Home) * (Event_Result == "made") * 1, na.rm = T),
-        RIMA = sum((
-          Event_Type %in% c("Dunk", "Layup", "Hook","Tip-In")
-        ) * (Event_Team == Away) * 1, na.rm = T),
-        dRIMA = sum((
-          Event_Type %in% c("Dunk", "Layup", "Hook","Tip-In")
-        ) * (Event_Team == Home) * 1, na.rm = T),
-        RIMM = sum((Event_Result == "made") * (
-          Event_Type %in% c("Dunk", "Layup", "Hook", "Tip-In")
-        ) * (Event_Team == Away) * 1, na.rm = T),
-        dRIMM = sum((Event_Result == "made") * (
-          Event_Type %in% c("Dunk", "Layup", "Hook", "Tip-In")
-        ) * (Event_Team == Home) * 1, na.rm = T),
-        ORB = sum((Event_Type == "Offensive Rebound") * (Event_Team == Away) * 1, na.rm = T),
-        dORB = sum((Event_Type == "Offensive Rebound") * (Event_Team == Home) * 1, na.rm = T),
-        DRB = sum((Event_Type == "Defensive Rebound") * (Event_Team == Away) * 1, na.rm = T),
-        dDRB = sum((Event_Type == "Defensive Rebound") * (Event_Team == Home) * 1, na.rm = T),
-        BLK = sum((Event_Type == "Blocked Shot") * (Event_Team == Away) * 1, na.rm = T),
-        dBLK = sum((Event_Type == "Blocked Shot") * (Event_Team == Home) * 1, na.rm = T),
-        TO = sum((Event_Type == "Turnover") * (Event_Team == Away) * 1, na.rm = T),
-        dTO = sum((Event_Type == "Turnover") * (Event_Team == Home) * 1, na.rm = T),
-        AST = sum((!is.na(Player_2)) * (Event_Team == Away) * 1, na.rm = T),
-        dAST =  sum((!is.na(Player_2)) * (Event_Team == Home) * 1, na.rm = T)
-      ) %>%
-      dplyr::rename(
-        P1 = Away.1,
-        P2 = Away.2,
-        P3 = Away.3,
-        P4 = Away.4,
-        P5 = Away.5,
-        Team = Away
-      ))
-
+      away_lineups <- lineup_stuff2 %>%
+        dplyr::group_by(Away.1, Away.2, Away.3, Away.4, Away.5, Away) %>%
+        dplyr::mutate(Shot_Value = as.numeric(Shot_Value),
+                      Event_Length = as.numeric(Event_Length),
+                      Poss_Num = as.numeric(Poss_Num),
+                      oPOSS_num = ifelse(Poss_Team == Away, as.numeric(paste0(ID,Poss_Num)), NA),
+                      dPOSS_num = ifelse(Poss_Team == Home, as.numeric(paste0(ID,Poss_Num)), NA)
+        ) %>%
+        dplyr::summarise(
+          Mins = sum(Event_Length / 60, na.rm = T),
+          oMins = sum(Event_Length * !is.na(oPOSS_num), na.rm = T)/60,
+          dMins = sum(Event_Length * !is.na(dPOSS_num), na.rm = T)/60,
+          oPOSS = dplyr::n_distinct(oPOSS_num, na.rm = T),
+          dPOSS = dplyr::n_distinct(dPOSS_num, na.rm = T),
+          PTS = sum((Event_Team == Away) * (Event_Result == "made") * Shot_Value, na.rm = T),
+          dPTS = sum((Event_Team == Home) * (Event_Result == "made") * Shot_Value,na.rm = T),
+          FGA = sum((Shot_Value %in% c(2, 3)) * (Event_Team == Away) * 1, na.rm = T),
+          dFGA = sum((Shot_Value %in% c(2, 3)) * (Event_Team == Home) * 1, na.rm = T),
+          FGM = sum((Shot_Value %in% c(2, 3)) * (Event_Team == Away) * (Event_Result == "made") * 1, na.rm = T),
+          dFGM = sum((Shot_Value %in% c(2, 3)) * (Event_Team == Home) * (Event_Result == "made") * 1, na.rm = T),
+          TPA = sum((Shot_Value == 3) * (Event_Team == Away) * 1, na.rm = T),
+          dTPA = sum((Shot_Value == 3) * (Event_Team == Home) * 1, na.rm = T),
+          TPM = sum((Shot_Value == 3) * (Event_Team == Away) * (Event_Result == "made") * 1, na.rm = T),
+          dTPM = sum((Shot_Value == 3) * (Event_Team == Home) * (Event_Result == "made") * 1, na.rm = T),
+          FTA = sum((Shot_Value == 1) * (Event_Team == Away) * 1, na.rm = T),
+          dFTA = sum((Shot_Value == 1) * (Event_Team == Home) * 1, na.rm = T),
+          FTM = sum((Shot_Value == 1) * (Event_Team == Away) * (Event_Result == "made") * 1, na.rm = T),
+          dFTM = sum((Shot_Value == 1) * (Event_Team == Home) * (Event_Result == "made") * 1, na.rm = T),
+          RIMA = sum((
+            Event_Type %in% c("Dunk", "Layup", "Hook","Tip-In")
+          ) * (Event_Team == Away) * 1, na.rm = T),
+          dRIMA = sum((
+            Event_Type %in% c("Dunk", "Layup", "Hook","Tip-In")
+          ) * (Event_Team == Home) * 1, na.rm = T),
+          RIMM = sum((Event_Result == "made") * (
+            Event_Type %in% c("Dunk", "Layup", "Hook", "Tip-In")
+          ) * (Event_Team == Away) * 1, na.rm = T),
+          dRIMM = sum((Event_Result == "made") * (
+            Event_Type %in% c("Dunk", "Layup", "Hook", "Tip-In")
+          ) * (Event_Team == Home) * 1, na.rm = T),
+          ORB = sum((Event_Type == "Offensive Rebound") * (Event_Team == Away) * 1, na.rm = T),
+          dORB = sum((Event_Type == "Offensive Rebound") * (Event_Team == Home) * 1, na.rm = T),
+          DRB = sum((Event_Type == "Defensive Rebound") * (Event_Team == Away) * 1, na.rm = T),
+          dDRB = sum((Event_Type == "Defensive Rebound") * (Event_Team == Home) * 1, na.rm = T),
+          BLK = sum((Event_Type == "Blocked Shot") * (Event_Team == Away) * 1, na.rm = T),
+          dBLK = sum((Event_Type == "Blocked Shot") * (Event_Team == Home) * 1, na.rm = T),
+          TO = sum((Event_Type == "Turnover") * (Event_Team == Away) * 1, na.rm = T),
+          dTO = sum((Event_Type == "Turnover") * (Event_Team == Home) * 1, na.rm = T),
+          AST = sum((!is.na(Player_2)) * (Event_Team == Away) * 1, na.rm = T),
+          dAST =  sum((!is.na(Player_2)) * (Event_Team == Home) * 1, na.rm = T)
+        ) %>%
+        dplyr::rename(
+          P1 = Away.1,
+          P2 = Away.2,
+          P3 = Away.3,
+          P4 = Away.4,
+          P5 = Away.5,
+          Team = Away
+        ))
+    
     if(include_transition) {
       suppressMessages(
         away_lineups_trans <- lineup_stuff2 %>%
@@ -2149,76 +2145,76 @@ get_lineups <-
             Team = Away
           ))
     }
-
+    
     #combine lineups from home and away and calculate a variety of stats
     suppressMessages(
-    lineups <- dplyr::bind_rows(home_lineups, away_lineups) %>%
-      dplyr::group_by(P1, P2, P3, P4, P5, Team) %>%
-      dplyr::summarise_if(is.numeric, sum) %>%
-      dplyr::mutate(
-        #estimate of possesions using common formula
-        ePOSS = (round(FGA + .475*FTA - ORB + TO) + round(dFGA + .475*dFTA - dORB + dTO)) / 2,
-        #efficiency scaled to points per 100 possessions
-        ORTG = PTS / oPOSS * 100,
-        DRTG = dPTS / dPOSS * 100,
-        NETRTG = ORTG - DRTG,
-        # field goal percentage
-        FG. = FGM / FGA,
-        dFG. = dFGM / dFGA,
-        #three point percentage
-        TPP = TPM / TPA,
-        dTPP = dTPM / dTPA,
-        #free throw percentage
-        FTP = FTM / FTA,
-        dFTP = dFTM / dFTA,
-        #effective shooting percentage
-        eFG. = (FGM + 0.5 * TPM) / FGA,
-        deFG. = (dFGM + 0.5 * dTPM) / dFGA,
-        #true shooting percentage
-        TS. = (PTS / 2) / (FGA + .475 * FTA),
-        dTS. = (dPTS / 2) / (dFGA + .475 * dFTA),
-        # rim field goal percentage
-        RIM. = RIMM / RIMA,
-        dRIM. = dRIMM / dRIMA,
-        # midrange field goal percentage
-        MID. = (FGM - RIMM - TPM) / (FGA - RIMA - TPA),
-        dMID. = (dFGM - dRIMM - dTPM) / (dFGA - dRIMA - dTPA),
-        #% of fga that are threes
-        TPrate = TPA / FGA,
-        dTPrate = dTPA / dFGA,
-        #% of fga at the rim
-        RIMrate = RIMA / FGA,
-        dRIMrate = dRIMA / dFGA,
-        #%midrange fga
-        MIDrate = (FGA - TPA - RIMA) / FGA,
-        dMIDrate = (dFGA - dTPA - dRIMA) / dFGA,
-        #rate of free throw attempts per field goal attempt
-        FTrate = FTA / FGA,
-        dFTrate = dFTA / dFGA,
-        #percentage of makes that are assisted
-        ASTrate = AST / FGM,
-        dASTrate = dAST / dFGM,
-        #percentage of possessions ending with turnovers
-        TOrate = TO / oPOSS,
-        dTOrate = dTO / dPOSS,
-        #rate that team blocks shots (so defensively) per opponent attempt
-        BLKrate = BLK / dFGA,
-        oBLKrate = dBLK / FGA,
-        #rebounding percentages
-        ORB. = ORB / (ORB + dDRB),
-        DRB. = DRB / (DRB + dORB),
-        # time per possession in  seconds = Mins per possession
-        TimePerPoss = (oMins / oPOSS) * 60,
-        dTimePerPoss = (dMins / dPOSS) * 60
-      ) %>%
-      #no need to have long decimals so round everything
-      dplyr::mutate(across(where(is.numeric), ~ round(., 3))) %>%
-      dplyr::ungroup() %>%
-      dplyr::select(P1:Team, Mins:dPOSS, ORTG:NETRTG, dplyr::everything()))
+      lineups <- dplyr::bind_rows(home_lineups, away_lineups) %>%
+        dplyr::group_by(P1, P2, P3, P4, P5, Team) %>%
+        dplyr::summarise_if(is.numeric, sum) %>%
+        dplyr::mutate(
+          #estimate of possesions using common formula
+          ePOSS = (round(FGA + .475*FTA - ORB + TO) + round(dFGA + .475*dFTA - dORB + dTO)) / 2,
+          #efficiency scaled to points per 100 possessions
+          ORTG = PTS / oPOSS * 100,
+          DRTG = dPTS / dPOSS * 100,
+          NETRTG = ORTG - DRTG,
+          # field goal percentage
+          FG. = FGM / FGA,
+          dFG. = dFGM / dFGA,
+          #three point percentage
+          TPP = TPM / TPA,
+          dTPP = dTPM / dTPA,
+          #free throw percentage
+          FTP = FTM / FTA,
+          dFTP = dFTM / dFTA,
+          #effective shooting percentage
+          eFG. = (FGM + 0.5 * TPM) / FGA,
+          deFG. = (dFGM + 0.5 * dTPM) / dFGA,
+          #true shooting percentage
+          TS. = (PTS / 2) / (FGA + .475 * FTA),
+          dTS. = (dPTS / 2) / (dFGA + .475 * dFTA),
+          # rim field goal percentage
+          RIM. = RIMM / RIMA,
+          dRIM. = dRIMM / dRIMA,
+          # midrange field goal percentage
+          MID. = (FGM - RIMM - TPM) / (FGA - RIMA - TPA),
+          dMID. = (dFGM - dRIMM - dTPM) / (dFGA - dRIMA - dTPA),
+          #% of fga that are threes
+          TPrate = TPA / FGA,
+          dTPrate = dTPA / dFGA,
+          #% of fga at the rim
+          RIMrate = RIMA / FGA,
+          dRIMrate = dRIMA / dFGA,
+          #%midrange fga
+          MIDrate = (FGA - TPA - RIMA) / FGA,
+          dMIDrate = (dFGA - dTPA - dRIMA) / dFGA,
+          #rate of free throw attempts per field goal attempt
+          FTrate = FTA / FGA,
+          dFTrate = dFTA / dFGA,
+          #percentage of makes that are assisted
+          ASTrate = AST / FGM,
+          dASTrate = dAST / dFGM,
+          #percentage of possessions ending with turnovers
+          TOrate = TO / oPOSS,
+          dTOrate = dTO / dPOSS,
+          #rate that team blocks shots (so defensively) per opponent attempt
+          BLKrate = BLK / dFGA,
+          oBLKrate = dBLK / FGA,
+          #rebounding percentages
+          ORB. = ORB / (ORB + dDRB),
+          DRB. = DRB / (DRB + dORB),
+          # time per possession in  seconds = Mins per possession
+          TimePerPoss = (oMins / oPOSS) * 60,
+          dTimePerPoss = (dMins / dPOSS) * 60
+        ) %>%
+        #no need to have long decimals so round everything
+        dplyr::mutate(across(where(is.numeric), ~ round(., 3))) %>%
+        dplyr::ungroup() %>%
+        dplyr::select(P1:Team, Mins:dPOSS, ORTG:NETRTG, dplyr::everything()))
     #change any NA/infinite/etc. that comes up in calculations to 0
     lineups[is.na(lineups)] <- 0
     lineups[,7:ncol(lineups)] <- apply(lineups[,7:ncol(lineups)], 2, function(x){ifelse(is.infinite(x),0,x)})
-
+    
     if(include_transition) {
       #combine lineups from home and away and calculate a variety of stats
       suppressMessages(
@@ -2306,23 +2302,23 @@ get_lineups <-
       #change any NA/infinite/etc. that comes up in calculations to 0
       lineups_trans[is.na(lineups_trans)] <- 0
       lineups_trans[,7:ncol(lineups_trans)] <- apply(lineups_trans[,7:ncol(lineups_trans)], 2, function(x){ifelse(is.infinite(x),0,x)})
-
+      
       lineups_combo <- lineups %>%
         dplyr::left_join(
           lineups_trans, by = c("P1", "P2", "P3", "P4", "P5", "Team")
         ) %>%
-       dplyr:: mutate(
+        dplyr:: mutate(
           oTransPCT = oPOSS_trans / oPOSS,
           dTransPCT = dPOSS_trans / dPOSS
         ) %>%
         select(P1:dTimePerPoss, oTransPCT, dTransPCT, Mins_trans:dTimePerPoss_half)
-
+      
       lineups_combo[is.na(lineups_combo)] <- 0
       lineups_combo[,7:ncol(lineups_combo)] <- apply(lineups_combo[,7:ncol(lineups_combo)], 2, function(x){ifelse(is.infinite(x),0,x)})
-
+      
       return(lineups_combo)
     }
-
+    
     return(lineups)
   }
 
@@ -2364,12 +2360,12 @@ on_off_generator <-
            Included = NA,
            Excluded = NA,
            include_transition = F
-           ) {
-
+  ) {
+    
     if(!include_transition) {
       Lineup_Data <- dplyr::select(Lineup_Data, -matches("_trans|_half"))
     }
-
+    
     #first find which team is being looked for from the players mentioned
     find_team <- unique(
       dplyr::filter(
@@ -2393,7 +2389,7 @@ on_off_generator <-
       Lineup_Data %>%
         dplyr::filter(Team == find_team)
     }
-
+    
     # Create matrix for on/off of each player identified
     players <-
       matrix(rep(NA, nrow(data) * length(Players)), ncol = length(Players))
@@ -2407,7 +2403,7 @@ on_off_generator <-
     # get all possible combinations of identified players
     poss_ind <- rep(list(c(T, F)), length(Players))
     combos <- expand.grid(poss_ind)
-
+    
     #calculate stats for each combination generated above
     final <- data.frame()
     for (i in 1:nrow(combos)) {
@@ -2419,7 +2415,7 @@ on_off_generator <-
                           return(F)
                         }
                       })
-
+      
       on <- data[relRow == T,] %>%
         dplyr::summarise(across(where(is.numeric), sum)) %>%
         dplyr::mutate(Status = paste(Players, ifelse(combos[i,], "On", "Off"), collapse = " | "))
@@ -2468,7 +2464,7 @@ on_off_generator <-
       dplyr::mutate(across(where(is.numeric), ~ round(., 3))) %>%
       dplyr::select(Status, Mins:PTS, oPOSS:NETRTG, everything())
     final[is.na(final)] <- 0
-
+    
     if(include_transition) {
       final <- final %>%
         dplyr::mutate(
@@ -2550,7 +2546,7 @@ on_off_generator <-
     }
     final[is.na(final)] <- 0
     final[,2:ncol(final)] <- apply(final[,2:ncol(final)], 2, function(x){ifelse(is.infinite(x),0,x)})
-
+    
     return(final)
   }
 
@@ -2568,11 +2564,11 @@ get_player_lineups <-
   function(Lineup_Data = NA,
            Included = NA,
            Excluded = NA) {
-
+    
     if(any(is.na(Included)) & any(is.na(Excluded))) {
       return(Lineup_Data)
     }
-
+    
     #create variable storing whether the lineup includes/excludes correct players
     relRow <- rep(T , nrow(Lineup_Data))
     relRow2 <- rep(T , nrow(Lineup_Data))
@@ -2595,7 +2591,7 @@ get_player_lineups <-
     #take all rows where both cases are true
     new_df <-Lineup_Data[which(relRow == 1 & relRow2 == 1),]
     return(new_df)
-}
+  }
 
 #' Player Stats Calculator
 #'
@@ -2675,7 +2671,7 @@ get_player_stats <- function(play_by_play_data = NA, multi.games = F, simple = F
                      na.rm = T
         ),
         PBACKM = sum((Event_Type %in% c("Dunk", "Layup", "Hook", "Tip-In")) * (Event_Result == "made") * (lag(Event_Type) == "Offensive Rebound"),
-                    na.rm = T
+                     na.rm = T
         ),
         FTA = sum((Shot_Value == 1), na.rm = T),
         FTM = sum((Shot_Value == 1) * (Event_Result == "made"), na.rm = T),
@@ -2747,11 +2743,11 @@ get_player_stats <- function(play_by_play_data = NA, multi.games = F, simple = F
       ) %>%
       dplyr::filter(Player_1 != "TEAM") %>%
       dplyr::rename(Player = Player_1,
-             Team = Event_Team) %>%
+                    Team = Event_Team) %>%
       dplyr::ungroup()
   }
-
-    # Can then count assists form player 2 column
+  
+  # Can then count assists form player 2 column
   if(simple) {
     assist_stats <- play_by_play_data %>%
       dplyr::group_by(ID, Player_2) %>%
@@ -2770,18 +2766,120 @@ get_player_stats <- function(play_by_play_data = NA, multi.games = F, simple = F
       dplyr::ungroup() %>%
       dplyr::filter(!is.na(Player))
   }
-    # passes in pbp to calculate minutes for each player using extraneous function
-    minutes <- get_mins(play_by_play_data)
-
-    # merges all dataframes together by game and player
-    # calculates some game level stats of use
-    final_stats <-
-      dplyr::left_join(player_stats, assist_stats, by = c("Player", "ID")) %>%
-      dplyr::left_join(minutes, by = c("Player", "ID"))
-    final_stats$AST[is.na(final_stats$AST)] <- 0
-
+  # passes in pbp to calculate minutes for each player using extraneous function
+  minutes <- get_mins(play_by_play_data)
+  
+  # merges all dataframes together by game and player
+  # calculates some game level stats of use
+  final_stats <-
+    dplyr::left_join(player_stats, assist_stats, by = c("Player", "ID")) %>%
+    dplyr::left_join(minutes, by = c("Player", "ID"))
+  final_stats$AST[is.na(final_stats$AST)] <- 0
+  
+  if(simple) {
+    final_stats <- final_stats %>%
+      dplyr::mutate(
+        FG. = FGM / FGA,
+        TP. = TPM / TPA,
+        FT. = FTM / FTA,
+        TS. = (PTS / 2) / (FGA + .475 * FTA),
+        eFG. = (FGM + 0.5 * TPM) / FGA,
+        RIM. = RIMM / RIMA,
+        MIDA = FGA - TPA - RIMA,
+        MIDM = FGM - TPM - RIMM,
+        MID. = (FGM - RIMM - TPM) / (FGA - RIMA - TPA)) %>%
+      dplyr::mutate_if(is.numeric, round, 3) %>%
+      dplyr::select(
+        ID:Player, MINS, oPOSS, PTS, ORB, DRB, AST, STL, BLK, TOV, PF, TS., eFG., FGM, FGA, FG.,
+        TPM, TPA, TP., FTM, FTA, FT., RIMM, RIMA, RIM., MIDM, MIDA, MID., FGA_trans, FGM_ast)
+    final_stats[,7:ncol(final_stats)][is.na(final_stats[,7:ncol(final_stats)])] <- 0
+  } else {
+    final_stats <- final_stats %>%
+      dplyr::mutate(
+        FG. = FGM / FGA,
+        TP. = TPM / TPA,
+        FT. = FTM / FTA,
+        TS. = (PTS / 2) / (FGA + .475 * FTA),
+        eFG. = (FGM + 0.5 * TPM) / FGA,
+        RIM. = RIMM / RIMA,
+        MIDA = FGA - TPA - RIMA,
+        MIDM = FGM - TPM - RIMM,
+        MID. = (FGM - RIMM - TPM) / (FGA - RIMA - TPA),
+        PBACK. = PBACKM / PBACKA,
+        # Assisted / Unassisted
+        MIDM_ast = FGM_ast - TPM_ast - RIMM_ast,
+        FG._unast = FGM_unast / FGA_unast,
+        TP._unast = TPM_unast / TPA_unast,
+        eFG._unast = (FGM_unast + 0.5 * TPM_unast) / FGA_unast,
+        RIM._unast = RIMM_unast / RIMA_unast,
+        MIDA_unast = FGA_unast - TPA_unast - RIMA_unast,
+        MIDM_unast = FGM_unast - TPM_unast - RIMM_unast,
+        MID._unast = (FGM_unast - RIMM_unast - TPM_unast) / (FGA_unast - RIMA_unast - TPA_unast),
+        # Transition / Halfcourt
+        FG._trans = FGM_trans / FGA_trans,
+        TP._trans = TPM_trans / TPA_trans,
+        FT._trans = FTM_trans / FTA_trans,
+        TS._trans = (PTS_trans / 2) / (FGA_trans + .475 * FTA_trans),
+        eFG._trans = (FGM_trans + 0.5 * TPM_trans) / FGA_trans,
+        RIM._trans = RIMM_trans / RIMA_trans,
+        MIDA_trans = FGA_trans - TPA_trans - RIMA_trans,
+        MIDM_trans = FGM_trans - TPM_trans - RIMM_trans,
+        MID._trans = (FGM_trans - RIMM_trans - TPM_trans) / (FGA_trans - RIMA_trans - TPA_trans),
+        FG._half = FGM_half / FGA_half,
+        TP._half = TPM_half / TPA_half,
+        FT._half = FTM_half / FTA_half,
+        TS._half = (PTS_half / 2) / (FGA_half + .475 * FTA_half),
+        eFG._half = (FGM_half + 0.5 * TPM_half) / FGA_half,
+        RIM._half = RIMM_half / RIMA_half,
+        MIDA_half = FGA_half - TPA_half - RIMA_half,
+        MIDM_half = FGM_half - TPM_half - RIMM_half,
+        MID._half = (FGM_half - RIMM_half - TPM_half) / (FGA_half - RIMA_half - TPA_half),
+        pct_FGA_trans = FGA_trans / FGA,
+        pct_TPA_trans = TPA_trans / FGA,
+        pct_RIMA_trans = RIMA_trans / FGA,
+        pct_FGM_trans = FGM_trans / FGM,
+        pct_TPM_trans = TPM_trans / FGM,
+        pct_RIMM_trans = RIMM_trans / FGM,
+        pct_FGM_ast = FGM_ast / FGM,
+        pct_TPM_ast = TPM_ast / TPM,
+        pct_RIMM_ast = RIMM_ast / RIMM
+      ) %>%
+      dplyr::mutate_if(is.numeric, round, 3) %>%
+      dplyr::select(
+        ID:Player, MINS, oPOSS, PTS, ORB, DRB, AST, STL, BLK, TOV, PF, TS., eFG., FGM, FGA, FG.,
+        TPM, TPA, TP., FTM, FTA, FT., RIMM, RIMA, RIM., MIDM, MIDA, MID., PBACKM, PBACKA, PBACK.,
+        BLK_rim, BLK_mid, BLK_three,
+        pct_FGA_trans:pct_RIMM_ast,
+        # Transition
+        PTS_trans, ORB_trans, DRB_trans, AST_trans, STL_trans, BLK_trans, TOV_trans, TS._trans, eFG._trans, FGM_trans, FGA_trans, FG._trans, TPM_trans, TPA_trans, TP._trans, FTM_trans, FTA_trans, FT._trans, RIMM_trans, RIMA_trans, RIM._trans, MIDM_trans, MIDA_trans, MID._trans,
+        # Half Court
+        PTS_half, ORB_half, DRB_half, AST_half, STL_half, BLK_half, TOV_half, TS._half, eFG._half, FGM_half, FGA_half, FG._half, TPM_half, TPA_half, TP._half, FTM_half, FTA_half, FT._half, RIMM_half, RIMA_half, RIM._half, MIDM_half, MIDA_half, MID._half,
+        # Assisted
+        PTS_ast, FGM_ast, TPM_ast, RIMM_ast, MIDM_ast,
+        # Unassisted
+        PTS_unast, eFG._unast, FGM_unast, FGA_unast, FG._unast, TPM_unast, TPA_unast, TP._unast, RIMM_unast, RIMA_unast, RIM._unast, MIDM_unast, MIDA_unast, MID._unast
+      )
+    final_stats[,7:ncol(final_stats)][is.na(final_stats[,7:ncol(final_stats)])] <- 0
+  }
+  # User has option to aggregate game stats into player stats over all games in play by play
+  # This essentially does the same processes as above but changes the grouping to exclude game specific ids
+  if (multi.games == T) {
+    starters <- play_by_play_data %>%
+      dplyr::group_by(ID) %>%
+      dplyr::slice(1) %>%
+      dplyr::ungroup() %>%
+      dplyr::select(Home.1:Away.5) %>%
+      unlist() %>%
+      table() %>%
+      as.data.frame() %>%
+      dplyr::rename("Player" = ".", "GS" = "Freq")
+    
     if(simple) {
-      final_stats <- final_stats %>%
+      multi_game <- final_stats %>%
+        dplyr::group_by(Player, Team) %>%
+        dplyr::mutate(GP = n()) %>%
+        dplyr::group_by(Player, Team, GP) %>%
+        dplyr::summarise_if(is.numeric, sum) %>%
         dplyr::mutate(
           FG. = FGM / FGA,
           TP. = TPM / TPA,
@@ -2791,14 +2889,22 @@ get_player_stats <- function(play_by_play_data = NA, multi.games = F, simple = F
           RIM. = RIMM / RIMA,
           MIDA = FGA - TPA - RIMA,
           MIDM = FGM - TPM - RIMM,
-          MID. = (FGM - RIMM - TPM) / (FGA - RIMA - TPA)) %>%
+          MID. = (FGM - RIMM - TPM) / (FGA - RIMA - TPA),
+          PCT_FGA_trans = FGA_trans / FGA,
+          PCT_FGM_ast = FGM_ast / FGM
+        ) %>%
+        dplyr::ungroup() %>%
         dplyr::mutate_if(is.numeric, round, 3) %>%
+        dplyr::left_join(starters, by = "Player") %>%
         dplyr::select(
-          ID:Player, MINS, oPOSS, PTS, ORB, DRB, AST, STL, BLK, TOV, PF, TS., eFG., FGM, FGA, FG.,
-          TPM, TPA, TP., FTM, FTA, FT., RIMM, RIMA, RIM., MIDM, MIDA, MID., FGA_trans, FGM_ast)
-      final_stats[,7:ncol(final_stats)][is.na(final_stats[,7:ncol(final_stats)])] <- 0
+          Player, Team, GP, GS, MINS, oPOSS, PTS, ORB, DRB, AST, STL, BLK, TOV, PF, PCT_FGA_trans, PCT_FGM_ast, TS., eFG., FGM, FGA, FG.,
+          TPM, TPA, TP., FTM, FTA, FT., RIMM, RIMA, RIM., MIDM, MIDA, MID.)
     } else {
-      final_stats <- final_stats %>%
+      multi_game <- final_stats %>%
+        dplyr::group_by(Player, Team) %>%
+        dplyr::mutate(GP = n()) %>%
+        dplyr::group_by(Player, Team, GP) %>%
+        dplyr::summarise_if(is.numeric, sum) %>%
         dplyr::mutate(
           FG. = FGM / FGA,
           TP. = TPM / TPA,
@@ -2811,7 +2917,6 @@ get_player_stats <- function(play_by_play_data = NA, multi.games = F, simple = F
           MID. = (FGM - RIMM - TPM) / (FGA - RIMA - TPA),
           PBACK. = PBACKM / PBACKA,
           # Assisted / Unassisted
-          MIDM_ast = FGM_ast - TPM_ast - RIMM_ast,
           FG._unast = FGM_unast / FGA_unast,
           TP._unast = TPM_unast / TPA_unast,
           eFG._unast = (FGM_unast + 0.5 * TPM_unast) / FGA_unast,
@@ -2848,12 +2953,14 @@ get_player_stats <- function(play_by_play_data = NA, multi.games = F, simple = F
           pct_TPM_ast = TPM_ast / TPM,
           pct_RIMM_ast = RIMM_ast / RIMM
         ) %>%
+        dplyr::ungroup() %>%
         dplyr::mutate_if(is.numeric, round, 3) %>%
+        dplyr::left_join(starters, by = "Player") %>%
         dplyr::select(
-          ID:Player, MINS, oPOSS, PTS, ORB, DRB, AST, STL, BLK, TOV, PF, TS., eFG., FGM, FGA, FG.,
-          TPM, TPA, TP., FTM, FTA, FT., RIMM, RIMA, RIM., MIDM, MIDA, MID., PBACKM, PBACKA, PBACK.,
-          BLK_rim, BLK_mid, BLK_three,
-          pct_FGA_trans:pct_RIMM_ast,
+          Player, Team, GP, GS, MINS, oPOSS, PTS, ORB, DRB, AST, STL, BLK, TOV, PF, TS., eFG., FGM, FGA, FG.,
+          TPM, TPA, TP., FTM, FTA, FT., RIMM, RIMA, RIM., MIDM, MIDA, MID., PBACKM, PBACKA, PBACK., BLK_rim, BLK_mid, BLK_three,
+          pct_FGA_trans, pct_TPA_trans, pct_RIMA_trans, pct_FGM_trans, pct_TPM_trans, pct_RIMM_trans,
+          pct_FGM_ast, pct_TPM_ast, pct_RIMM_ast,
           # Transition
           PTS_trans, ORB_trans, DRB_trans, AST_trans, STL_trans, BLK_trans, TOV_trans, TS._trans, eFG._trans, FGM_trans, FGA_trans, FG._trans, TPM_trans, TPA_trans, TP._trans, FTM_trans, FTA_trans, FT._trans, RIMM_trans, RIMA_trans, RIM._trans, MIDM_trans, MIDA_trans, MID._trans,
           # Half Court
@@ -2863,123 +2970,12 @@ get_player_stats <- function(play_by_play_data = NA, multi.games = F, simple = F
           # Unassisted
           PTS_unast, eFG._unast, FGM_unast, FGA_unast, FG._unast, TPM_unast, TPA_unast, TP._unast, RIMM_unast, RIMA_unast, RIM._unast, MIDM_unast, MIDA_unast, MID._unast
         )
-      final_stats[,7:ncol(final_stats)][is.na(final_stats[,7:ncol(final_stats)])] <- 0
     }
-    # User has option to aggregate game stats into player stats over all games in play by play
-    # This essentially does the same processes as above but changes the grouping to exclude game specific ids
-    if (multi.games == T) {
-      starters <- play_by_play_data %>%
-        dplyr::group_by(ID) %>%
-        dplyr::slice(1) %>%
-        dplyr::ungroup() %>%
-        dplyr::select(Home.1:Away.5) %>%
-        unlist() %>%
-        table() %>%
-        as.data.frame() %>%
-        dplyr::rename("Player" = ".", "GS" = "Freq")
-
-      if(simple) {
-        multi_game <- final_stats %>%
-          dplyr::group_by(Player, Team) %>%
-          dplyr::mutate(GP = n()) %>%
-          dplyr::group_by(Player, Team, GP) %>%
-          dplyr::summarise_if(is.numeric, sum) %>%
-          dplyr::mutate(
-            FG. = FGM / FGA,
-            TP. = TPM / TPA,
-            FT. = FTM / FTA,
-            TS. = (PTS / 2) / (FGA + .475 * FTA),
-            eFG. = (FGM + 0.5 * TPM) / FGA,
-            RIM. = RIMM / RIMA,
-            MIDA = FGA - TPA - RIMA,
-            MIDM = FGM - TPM - RIMM,
-            MID. = (FGM - RIMM - TPM) / (FGA - RIMA - TPA),
-            PCT_FGA_trans = FGA_trans / FGA,
-            PCT_FGM_ast = FGM_ast / FGM
-            ) %>%
-          dplyr::ungroup() %>%
-          dplyr::mutate_if(is.numeric, round, 3) %>%
-          dplyr::left_join(starters, by = "Player") %>%
-          dplyr::select(
-            Player, Team, GP, GS, MINS, oPOSS, PTS, ORB, DRB, AST, STL, BLK, TOV, PF, PCT_FGA_trans, PCT_FGM_ast, TS., eFG., FGM, FGA, FG.,
-            TPM, TPA, TP., FTM, FTA, FT., RIMM, RIMA, RIM., MIDM, MIDA, MID.)
-      } else {
-        multi_game <- final_stats %>%
-          dplyr::group_by(Player, Team) %>%
-          dplyr::mutate(GP = n()) %>%
-          dplyr::group_by(Player, Team, GP) %>%
-          dplyr::summarise_if(is.numeric, sum) %>%
-          dplyr::mutate(
-            FG. = FGM / FGA,
-            TP. = TPM / TPA,
-            FT. = FTM / FTA,
-            TS. = (PTS / 2) / (FGA + .475 * FTA),
-            eFG. = (FGM + 0.5 * TPM) / FGA,
-            RIM. = RIMM / RIMA,
-            MIDA = FGA - TPA - RIMA,
-            MIDM = FGM - TPM - RIMM,
-            MID. = (FGM - RIMM - TPM) / (FGA - RIMA - TPA),
-            PBACK. = PBACKM / PBACKA,
-            # Assisted / Unassisted
-            FG._unast = FGM_unast / FGA_unast,
-            TP._unast = TPM_unast / TPA_unast,
-            eFG._unast = (FGM_unast + 0.5 * TPM_unast) / FGA_unast,
-            RIM._unast = RIMM_unast / RIMA_unast,
-            MIDA_unast = FGA_unast - TPA_unast - RIMA_unast,
-            MIDM_unast = FGM_unast - TPM_unast - RIMM_unast,
-            MID._unast = (FGM_unast - RIMM_unast - TPM_unast) / (FGA_unast - RIMA_unast - TPA_unast),
-            # Transition / Halfcourt
-            FG._trans = FGM_trans / FGA_trans,
-            TP._trans = TPM_trans / TPA_trans,
-            FT._trans = FTM_trans / FTA_trans,
-            TS._trans = (PTS_trans / 2) / (FGA_trans + .475 * FTA_trans),
-            eFG._trans = (FGM_trans + 0.5 * TPM_trans) / FGA_trans,
-            RIM._trans = RIMM_trans / RIMA_trans,
-            MIDA_trans = FGA_trans - TPA_trans - RIMA_trans,
-            MIDM_trans = FGM_trans - TPM_trans - RIMM_trans,
-            MID._trans = (FGM_trans - RIMM_trans - TPM_trans) / (FGA_trans - RIMA_trans - TPA_trans),
-            FG._half = FGM_half / FGA_half,
-            TP._half = TPM_half / TPA_half,
-            FT._half = FTM_half / FTA_half,
-            TS._half = (PTS_half / 2) / (FGA_half + .475 * FTA_half),
-            eFG._half = (FGM_half + 0.5 * TPM_half) / FGA_half,
-            RIM._half = RIMM_half / RIMA_half,
-            MIDA_half = FGA_half - TPA_half - RIMA_half,
-            MIDM_half = FGM_half - TPM_half - RIMM_half,
-            MID._half = (FGM_half - RIMM_half - TPM_half) / (FGA_half - RIMA_half - TPA_half),
-            pct_FGA_trans = FGA_trans / FGA,
-            pct_TPA_trans = TPA_trans / FGA,
-            pct_RIMA_trans = RIMA_trans / FGA,
-            pct_FGM_trans = FGM_trans / FGM,
-            pct_TPM_trans = TPM_trans / FGM,
-            pct_RIMM_trans = RIMM_trans / FGM,
-            pct_FGM_ast = FGM_ast / FGM,
-            pct_TPM_ast = TPM_ast / TPM,
-            pct_RIMM_ast = RIMM_ast / RIMM
-          ) %>%
-          dplyr::ungroup() %>%
-          dplyr::mutate_if(is.numeric, round, 3) %>%
-          dplyr::left_join(starters, by = "Player") %>%
-          dplyr::select(
-            Player, Team, GP, GS, MINS, oPOSS, PTS, ORB, DRB, AST, STL, BLK, TOV, PF, TS., eFG., FGM, FGA, FG.,
-            TPM, TPA, TP., FTM, FTA, FT., RIMM, RIMA, RIM., MIDM, MIDA, MID., PBACKM, PBACKA, PBACK., BLK_rim, BLK_mid, BLK_three,
-            pct_FGA_trans, pct_TPA_trans, pct_RIMA_trans, pct_FGM_trans, pct_TPM_trans, pct_RIMM_trans,
-            pct_FGM_ast, pct_TPM_ast, pct_RIMM_ast,
-            # Transition
-            PTS_trans, ORB_trans, DRB_trans, AST_trans, STL_trans, BLK_trans, TOV_trans, TS._trans, eFG._trans, FGM_trans, FGA_trans, FG._trans, TPM_trans, TPA_trans, TP._trans, FTM_trans, FTA_trans, FT._trans, RIMM_trans, RIMA_trans, RIM._trans, MIDM_trans, MIDA_trans, MID._trans,
-            # Half Court
-            PTS_half, ORB_half, DRB_half, AST_half, STL_half, BLK_half, TOV_half, TS._half, eFG._half, FGM_half, FGA_half, FG._half, TPM_half, TPA_half, TP._half, FTM_half, FTA_half, FT._half, RIMM_half, RIMA_half, RIM._half, MIDM_half, MIDA_half, MID._half,
-            # Assisted
-            PTS_ast, FGM_ast, TPM_ast, RIMM_ast, MIDM_ast,
-            # Unassisted
-            PTS_unast, eFG._unast, FGM_unast, FGA_unast, FG._unast, TPM_unast, TPA_unast, TP._unast, RIMM_unast, RIMA_unast, RIM._unast, MIDM_unast, MIDA_unast, MID._unast
-          )
-        }
-      multi_game[is.na(multi_game)] <- 0
-      return(multi_game)
-    } else {
-      return(final_stats)
-    }
+    multi_game[is.na(multi_game)] <- 0
+    return(multi_game)
+  } else {
+    return(final_stats)
+  }
 }
 
 convert_events <- function(events) {
@@ -3038,40 +3034,27 @@ convert_events <- function(events) {
 }
 
 get_mins <- function(play_by_play_data) {
-  #since players can appear in 10 different columns, iterate through each to calculate on court stats efficiently
-  #create column names for all of the home/away matrix
-  cols <- paste0(rep(c("Home", "Away"), each = 5), ".", rep(1:5, 2))
-  #will store player calculatings for each column
-  player_data <- list()
-  #iterate through each player column
-  for (i in 1:10) {
-    #group by the given player column in iteration
-    #calculate stats needed to get the players minutes and possessions on the court for
-    player <- play_by_play_data %>%
-      dplyr::group_by_at(c(cols[i], "ID")) %>%
-      dplyr::mutate(
-        POSS_num = ifelse((Poss_Team == Home & i <= 5 | Poss_Team == Away & i > 5), as.numeric(Poss_Num), NA)
-      ) %>%
-      dplyr::summarise(
-        Mins = sum(Event_Length, na.rm = T) / 60,
-        # Get total possessions by the count of distinct possession numbers
-        oPOSS = dplyr::n_distinct(paste(ID,POSS_num), na.rm = T),
-        .groups = "drop"
-      ) %>%
-      dplyr::ungroup() %>%
-      dplyr::rename(Player =  cols[i]) %>%
-      dplyr::mutate_if(is.numeric, round, 3) %>%
-      dplyr::ungroup()
-    #once this is calculated add to the data frame of all player columns
-    player_data[[i]] <- player
-  }
-  player_data <- dplyr::bind_rows(player_data)
-  #can now group by each player name and get their total minutes and possessions
-  final_df <- player_data %>%
-    dplyr::group_by(Player, ID) %>%
-    dplyr::summarise(MINS = sum(Mins),
-                     oPOSS = sum(oPOSS),
-                     .groups = "drop") %>%
+  final_df <- play_by_play_data %>%
+    dplyr::mutate(
+      home_poss = (Home == Poss_Team)
+    ) %>%
+    dplyr::select(ID, home_poss, Event_Length, Poss_Num, tidyselect::matches('(Home|Away)\\.[1-5]')) %>%
+    tidyr::pivot_longer(cols = tidyselect::matches('(Home|Away)\\.[1-5]')) %>%
+    dplyr::mutate(
+      isOffense = dplyr::case_when(
+        home_poss & grepl('Home', name) ~ T,
+        !home_poss & grepl('Away', name) ~ T,
+        T ~ F
+      )
+    ) %>%
+    dplyr::group_by(ID, value) %>%
+    dplyr::summarise(
+      MINS = sum(Event_Length) / 60,
+      oPOSS = dplyr::n_distinct(Poss_Num[which(isOffense)]),
+      .groups = 'drop'
+    ) %>%
+    dplyr::rename(Player =  value) %>%
+    dplyr::mutate_if(is.numeric, round, 3) %>%
     dplyr::ungroup()
 }
 binder <- dplyr::bind_rows
@@ -3088,46 +3071,46 @@ binder <- dplyr::bind_rows
 #' @export
 #' @return ggplot object containing minutes distribution
 
-plot_mins_dist <- function(play_by_play_data = NA, team = NA, threshold = NA) {
+plot_mins_dist <- function(play_by_play_data = NA, team = NA, threshold = NA, split_position = F) {
   if(all(is.na(play_by_play_data)) | is.na(team)) {
     stop("Missing parameters")
   }
-
+  
   if(is.na(threshold)) {
     threshold <- 0
   }
-
+  
   home_team <- play_by_play_data %>%
     dplyr::filter(Home == team) %>%
-    dplyr::select(Home,Away,Game_Seconds, Home.1:Home.5) %>%
+    dplyr::select(ID,Home,Away,Game_Seconds, Home.1:Home.5) %>%
     dplyr::mutate(Game_Mins = Game_Seconds %/% 60)
   away_team <- play_by_play_data %>%
     dplyr::filter(Away == team) %>%
-    dplyr::select(Home,Away,Game_Seconds,Away.1:Away.5) %>%
+    dplyr::select(ID,Home,Away,Game_Seconds,Away.1:Away.5) %>%
     dplyr::mutate(Game_Mins = Game_Seconds %/% 60)
-
-  all_players <- data.frame(Game_Mins = NA, Player = NA, Home = NA, Away = NA)
+  
+  all_players <- data.frame(Game_Mins = NA, Player = NA, Home = NA, Away = NA, ID = NA)
   for(i in 1:5) {
-    player_row <- home_team[,c(i+3,9,1,2)]
+    player_row <- home_team[,c(i+4,10,1:3)]
     colnames(player_row)[1] <- "Player"
     all_players <- rbind(all_players, player_row)
-    player_row <- away_team[,c(i+3,9,1,2)]
+    player_row <- away_team[,c(i+4,10,1:3)]
     colnames(player_row)[1] <- "Player"
     all_players <- rbind(all_players, player_row)
   }
-
+  
   player_mins <- all_players %>%
-    dplyr::group_by(Player, Game_Mins, Home, Away) %>%
-    dplyr::summarise(count = dplyr::n()) %>%
+    dplyr::group_by(Player, Game_Mins, ID) %>%
+    dplyr::summarise(count = dplyr::n(), .groups = "drop") %>%
     dplyr::group_by(Player, Game_Mins) %>%
-    dplyr::summarise(count = dplyr::n()) %>%
+    dplyr::summarise(count = dplyr::n(), .groups = "drop") %>%
     dplyr::filter(!is.na(Player), !is.na(Game_Mins))
-
+  
   totals <- expand.grid(unique(player_mins$Player), 0:40, stringsAsFactors = F)
   colnames(totals) <- c("Player", "Game_Mins")
   totals <- left_join(totals, player_mins, by = c("Player", "Game_Mins"))
   totals$count[is.na(totals$count)] <- 0
-
+  
   labels <- sapply(totals$Player, function(x){
     spl <- strsplit(x, split = "[.]")[[1]]
     first <- paste0(substr(spl[1],1,1), tolower(substr(spl[1],2,nchar(spl[1]))))
@@ -3138,10 +3121,21 @@ plot_mins_dist <- function(play_by_play_data = NA, team = NA, threshold = NA) {
       paste(first,last)
     }
   }, USE.NAMES = F)
-
+  
+  if(split_position) {
+    year <- substr(first(play_by_play_data$Date),7,10)
+    month <- substr(first(play_by_play_data$Date),1,2)
+    year <- ifelse(as.numeric(month)<=5, as.numeric(year)-1, year)
+    
+    season <- paste0(as.numeric(year), "-", as.numeric(year)-1999)
+    roster <- get_team_roster(team.name = team, season = season)
+    totals <- left_join(totals, roster, by = "Player")
+    totals$CleanName <- paste(totals$Jersey,"-", totals$CleanName)
+  }
+  
   totals$CleanName <- if(is.null(totals$CleanName)) labels else totals$CleanName
   totals$CleanName <- ifelse(totals$CleanName == "NA - NA", labels, totals$CleanName)
-
+  
   p <- totals %>%
     dplyr::group_by(CleanName) %>%
     dplyr::mutate(Total_Mins = sum(count)) %>%
@@ -3162,7 +3156,7 @@ plot_mins_dist <- function(play_by_play_data = NA, team = NA, threshold = NA) {
       axis.ticks = ggplot2::element_blank(),
       text = ggplot2::element_text(family = "Helvetica", color = "gray25", face = "bold")) +
     ggplot2::ggtitle(paste(team,"minutes distribution"))
-
+  
   if(split_position) {
     p +
       ggplot2::facet_wrap(.~Pos, ncol = 1, scales = "free_y") +
@@ -3171,7 +3165,7 @@ plot_mins_dist <- function(play_by_play_data = NA, team = NA, threshold = NA) {
   } else {
     p
   }
-
+  
 }
 
 #' Duo Plot
@@ -3197,12 +3191,12 @@ plot_duos <- function(Lineup_Data = NA, team = NA, min_mins = 0, regressed_poss 
   if(all(is.na(Lineup_Data)) | is.na(team)) {
     stop("Missing Function Parameters")
   }
-
+  
   lineup_data <- dplyr::filter(Lineup_Data, Team == team)
-
+  
   players <- unique(unlist(lineup_data[,1:5]))
   players <- players[!is.na(players)]
-
+  
   labels <- sapply(players, function(x){
     spl <- strsplit(x, split = "[.]")[[1]]
     first <- paste0(substr(spl[1],1,1), tolower(substr(spl[1],2,nchar(spl[1]))))
@@ -3213,11 +3207,11 @@ plot_duos <- function(Lineup_Data = NA, team = NA, min_mins = 0, regressed_poss 
       paste(first,last)
     }
   })
-
+  
   r_bar_o <- (sum(lineup_data$PTS) / sum(lineup_data$oPOSS))
   r_bar_d <- (sum(lineup_data$dPTS) / sum(lineup_data$dPOSS))
   n_bar <- (mean(lineup_data$dPOSS) + mean(lineup_data$oPOSS))/2 + regressed_poss
-
+  
   duos <- data.frame(gtools::combinations(n=length(players), r=2, v=players, repeats.allowed = F))
   colnames(duos) <- c("from","to")
   duos$mins <- NA
@@ -3234,34 +3228,34 @@ plot_duos <- function(Lineup_Data = NA, team = NA, min_mins = 0, regressed_poss 
   duos[,1:2] <- apply(duos[,1:2],2,as.character)
   duos$netrtg <- duos$ortg - duos$drtg
   duos$adjrtg <- (duos$adjortg - duos$adjdrtg)
-
+  
   scale <- round(c(min(duos$adjrtg)-.02,mean(duos$adjrtg),max(duos$adjrtg)+.02),2)
-
+  
   dataset <- dplyr::filter(duos, mins >= min_mins)
-
+  
   if(nrow(dataset) <= 0) {
     print("No Duos Found- Try Lowering Minutes")
     return(data.frame())
   }
-
+  
   final_players <- unique(unlist(dataset[,1:2]))
-
+  
   grph <- igraph::graph_from_data_frame(dataset,
-                                directed = F,
-                                vertices = data.frame(name = sort(final_players),
-                                                      lab = sort(labels[which(names(labels) %in% sort(final_players))]))
+                                        directed = F,
+                                        vertices = data.frame(name = sort(final_players),
+                                                              lab = sort(labels[which(names(labels) %in% sort(final_players))]))
   )
-
+  
   ggraph::ggraph(grph, layout = "linear", circular = T) +
     ggraph::geom_edge_arc(ggplot2::aes(edge_width = mins,
-                      color = adjrtg*100)) +
+                                       color = adjrtg*100)) +
     ggraph::scale_edge_colour_gradientn(breaks = scale*100,
-                               colors = c("steelblue","white","indianred"),
-                               labels = scale*100,
-                               name = "Adj. Net Efficiency per 100",
-                               limits = c(min(scale)*100,max(scale)*100),
-                               na.value = "transparent",
-                               guide = ggraph::guide_edge_colorbar()) +
+                                        colors = c("steelblue","white","indianred"),
+                                        labels = scale*100,
+                                        name = "Adj. Net Efficiency per 100",
+                                        limits = c(min(scale)*100,max(scale)*100),
+                                        na.value = "transparent",
+                                        guide = ggraph::guide_edge_colorbar()) +
     ggraph::scale_edge_width(name = "Minutes Together") +
     ggraph::geom_node_text(ggplot2::aes(label = lab), color = "gray25", size = 4.5, fontface = "bold") +
     ggraph::geom_node_point(size = 15, alpha = 0.1, color = "gray50") +
@@ -3275,7 +3269,7 @@ plot_duos <- function(Lineup_Data = NA, team = NA, min_mins = 0, regressed_poss 
       plot.background = ggplot2::element_rect(fill = "gray75"),
       plot.caption = ggplot2::element_text(family = "Helvetica", color = "gray25", face = "bold"),
       legend.title = ggplot2::element_text(family = "Helvetica", color = "gray25", face = "bold")
-      ) +
+    ) +
     ggplot2::scale_x_continuous(expand = c(.15, .15), limits = c(-1,1)) +
     ggplot2::scale_y_continuous(expand = c(.15, .15), limits = c(-1,1))
 }
@@ -3297,14 +3291,14 @@ scrape_box <-
            save_file = F,
            base_path = NA,
            overwrite = F) {
-
+    
     status <- "CLEAN"
-
-    url_text <- paste0("http://stats.ncaa.org/contests/", game_id,"/box_score")
+    
+    url_text <- paste0("https://stats.ncaa.org/contests/", game_id,"/individual_stats")
     file_dir <- paste0(base_path, "box_score/")
     file_path <- paste0(file_dir, game_id, ".html")
     isUrlRead <- F
-
+    
     # Give user option to save raw html file (to make future processing more efficient)
     if (save_file & !is.na(base_path) & (!file.exists(file_path) | overwrite)) {
       isUrlRead <- T
@@ -3321,53 +3315,65 @@ scrape_box <-
       html <- readLines(con = file_url, warn=F)
       close(file_url)
     }
-
+    
     table <- XML::readHTMLTable(html)
-
+    
     if (length(table) == 0) {
       message("Game Not Found")
       return(data.frame())
     }
-
+    
     background <- table[[1]]
-
-    away <- table[[5]]
-    colnames(away) <- away[1,]
-    away <- away[2:(nrow(away)-1),]
-    away$Team <- gsub(" \\((.*)\\)", "", background[1,1])
-
-    home <- table[[6]]
-    colnames(home) <- home[1,]
-    home <- home[2:(nrow(home)-1),]
-    home$Team <- gsub(" \\((.*)\\)", "", background[2,1])
-
+    
+    away <- table[[4]]
+    home <- table[[5]]
+    
+    
+    away_end <- which(away[['Name']] == 'TEAM') - 1
+    if (length(away_end) != 1) {
+      away_end <- nrow(away) - 2
+    }
+    away <- away[1:away_end,]
+    away$Team <- gsub(" \\((.*)\\)", "", background[2,1])
+    away <- away[,names(away) != 'Avg']
+    
+    home_end <- which(home[['Name']] == 'TEAM') - 1
+    if (length(home_end) != 1) {
+      home_end <- nrow(home) - 2
+    }
+    home <- home[1:home_end,]
+    home$Team <- gsub(" \\((.*)\\)", "", background[3,1])
+    home <- home[,names(home) != 'Avg']
+    
+    
     box <- bind_rows(home, away)
-
-    clean_name <- sapply(strsplit(box$Player, ","), function(x){trimws(paste(x[length(x)],x[1]))})
+    
+    clean_name <- box$Name
     format <- gsub("[^[:alnum:] ]", "", clean_name)
     format <- toupper(gsub("\\s+",".", format))
     player_name <- gsub("(\\.JR\\.|\\.SR\\.|\\.J\\.R\\.|\\.JR\\.|JR\\.|SR\\.|\\.SR|\\.JR|\\.SR|\\.III|\\.II|\\.IV)$","", format)
     player_name <- trimws(player_name)
-
+    
     clean_name <- gsub("(\\.JR\\.|\\.SR\\.|\\.J\\.R\\.|\\.JR\\.|JR\\.|SR\\.|\\.SR|\\.JR|\\.SR|\\.III|\\.II|\\.IV)$","", clean_name, ignore.case = T)
     clean_name <- trimws(clean_name)
-
+    
     box$CleanName <- clean_name
     box$Player <- player_name
     box$Game_ID <- game_id
-
+    box$Box_ID <- game_id
+    
     final <- box %>%
-      rename("TPM" = "3FG", "TPA" = "3FGA", "FTM" = "FT", "ORB" = "ORebs", "DRB" = "DRebs", "TRB" = "Tot Reb", "Tech" = "Tech Fouls") %>%
-      select(Game_ID, Team, Player, everything()) %>%
+      rename("TPM" = "3FG", "TPA" = "3FGA", "FTM" = "FT", "ORB" = "ORebs", "DRB" = "DRebs", "TRB" = "TotReb", "Tech" = "TechFouls") %>%
+      select(Box_ID, Team, Player, everything()) %>%
       filter(Player != "TEAM.TEAM")
-
+    
     if(isUrlRead) {
       Sys.sleep(2)
     }
-
-    message(paste(background[2,1], "v", background[1,1], "|", game_id))
+    
+    message(paste(background[3,1], "v", background[2,1], "|", game_id))
     return(final)
-}
+  }
 
 #' Box Scores Scrape
 #'
@@ -3403,9 +3409,9 @@ get_box_scores <- function(game_ids, multi.games = F, use_file = F, save_file = 
   game_data <- game_data %>%
     dplyr::filter(MP != '') %>%
     dplyr::mutate(
-      dplyr::across(all_of(c("G", "FGM", "FGA", "TPM", "TPA", "FTM", "FTA", "PTS", "ORB", "DRB", "TRB", "AST", "TO", "STL", "BLK", "PF", "DQ", "Tech")), function(x){x[x==''] <- 0; return(x)}),
-      dplyr::across(all_of(c("MP", "G", "FGM", "FGA", "TPM", "TPA", "FTM", "FTA", "PTS", "ORB", "DRB", "TRB", "AST", "TO", "STL", "BLK", "PF", "DQ", "Tech")), ~gsub("\\/", "", .x)),
-      dplyr::across(all_of(c("G", "FGM", "FGA", "TPM", "TPA", "FTM", "FTA", "PTS", "ORB", "DRB", "TRB", "AST", "TO", "STL", "BLK", "PF", "DQ", "Tech")), as.numeric),
+      dplyr::across(any_of(c("G", "FGM", "FGA", "TPM", "TPA", "FTM", "FTA", "PTS", "ORB", "DRB", "TRB", "AST", "TO", "STL", "BLK", "Fouls", "DQ", "Tech")), function(x){x[x==''] <- 0; return(x)}),
+      dplyr::across(any_of(c("MP", "G", "FGM", "FGA", "TPM", "TPA", "FTM", "FTA", "PTS", "ORB", "DRB", "TRB", "AST", "TO", "STL", "BLK", "Fouls", "DQ", "Tech")), ~gsub("\\/", "", .x)),
+      dplyr::across(any_of(c("G", "FGM", "FGA", "TPM", "TPA", "FTM", "FTA", "PTS", "ORB", "DRB", "TRB", "AST", "TO", "STL", "BLK", "Fouls", "DQ", "Tech")), as.numeric),
       MP = round(as.numeric(gsub(":(.*)", "", MP)) + as.numeric(gsub("(.*):", "", MP))/60, 1),
       FG. = FGM / FGA,
       TP. = TPM / TPA,
@@ -3415,7 +3421,8 @@ get_box_scores <- function(game_ids, multi.games = F, use_file = F, save_file = 
       dplyr::across(where(is.numeric), function(x){x[is.nan(x)] <- 0; return(x)})
     ) %>%
     dplyr::select(
-      Game_ID:MP, PTS, ORB, DRB, TRB, AST, TO, STL, BLK, FGA, FGM, FG., TPA, TPM, TP., FTA, FTM, FT., TS., eFG., PF, DQ, Tech, CleanName
+      Game_ID:MP,
+      any_of(c("PTS", "ORB", "DRB", "TRB", "AST", "TO", "STL", "BLK", "FGA", "FGM", "FG.", "TPA", "TPM", "TP.", "FTA", "FTM", "FT.", "TS.", "eFG.", "Fouls", "DQ", "Tech", "CleanName"))
     )
   
   if (multi.games == T) {
@@ -3435,7 +3442,7 @@ get_box_scores <- function(game_ids, multi.games = F, use_file = F, save_file = 
         eFG. = (FGM + 0.5 * TPM) / FGA) %>%
       dplyr::mutate(dplyr::across(where(is.numeric), function(x){x[is.nan(x)] <- 0; return(x)})) %>%
       dplyr::select(
-        Player, CleanName, Team, Pos, MP, G, PTS, ORB, DRB, TRB, AST, TO, STL, BLK, FGA, FGM, FG., TPA, TPM, TP., FTA, FTM, FT., TS., eFG., PF, DQ, Tech, CleanName
+        Player, CleanName, Team, Pos, MP, G, PTS, ORB, DRB, TRB, AST, TO, STL, BLK, FGA, FGM, FG., TPA, TPM, TP., FTA, FTM, FT., TS., eFG., Fouls, DQ, Tech, CleanName
       )
     
     return(multi_game)
@@ -3481,14 +3488,14 @@ get_possessions <- function(play_by_play_data = NA, simple = F) {
         .groups = "drop"
       )
   }
-
-
+  
+  
   missing_rows <- apply(possession_df[,which(colnames(possession_df)=="Home.1"):which(colnames(possession_df)=="Away.5")], 1, function(x){sum(is.na(x))})
   message(paste("Forced to remove", length(which(missing_rows!=0)), "rows due to missing players in on/off"))
-
+  
   possession_df <- possession_df %>%
     dplyr::filter(missing_rows==0)
-
+  
   # Now sorts the home and away player alphabetically so players are always in the same column for a given lineup
   if(!simple) {
     sorted_df <- apply(possession_df, 1, function(x)
@@ -3500,7 +3507,7 @@ get_possessions <- function(play_by_play_data = NA, simple = F) {
     #Converts the sorted back into a data frame
     sorted_df <-
       data.frame(matrix(unlist(sorted_df), ncol = ncol(possession_df), byrow=T), stringsAsFactors = F)
-
+    
     colnames(sorted_df) <- colnames(possession_df)
     sorted_df <- sorted_df %>%
       mutate(across(c("ID", "Poss_Num", "Home_Score", "Away_Score", "PTS",
@@ -3510,3 +3517,4 @@ get_possessions <- function(play_by_play_data = NA, simple = F) {
     return(possession_df)
   }
 }
+
