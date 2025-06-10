@@ -1106,7 +1106,7 @@ get_date_games = function (date = as.character(format(Sys.Date() - 1, "%m/%d/%Y"
   seasonid <-
     dplyr::case_when(
       dateform > as.Date("2024-05-01") & dateform <=
-        as.Date("2023-05-01") ~ 18423,
+        as.Date("2025-05-01") ~ 18423,
       dateform > as.Date("2023-05-01") & dateform <=
         as.Date("2024-05-01") ~ 18220,
       dateform > as.Date("2022-05-01") & dateform <=
