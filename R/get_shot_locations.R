@@ -46,7 +46,7 @@ get_shot_locations <- function(gameids) {
           Half_Status == 4 ~ 50 * 60 - (minutes * 60 + seconds),
           Half_Status == 5 ~ 55 * 60 - (minutes * 60 + seconds),
           Half_Status == 6 ~ 60 * 60 - (minutes * 60 + seconds),
-          Half_Status == 7 ~ 65 * 60 - (minutes * 60 + seconds)
+          Half_Status == 7 ~ 65 * 60 - (minutes * 60 + seconds),
           TRUE ~ 70 * 60 - (minutes * 60 + seconds)
         ),
         ID = i
