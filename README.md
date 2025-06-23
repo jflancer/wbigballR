@@ -2,8 +2,6 @@
 
 - Worked in several sample games but has not been tested thoroughly
 
-###NOTE THIS DOCUMENTATION IS SLIGHTLY OUTDATED FOLLOWING THE LATEST PACKAGE UPDATE 1/13
-
 `wbigballR` is an R package for working with women's NCAA Basketball data. This 
 package primarily revolves around the use of schedule, roster, and play-by-play data via stats.ncaa.com, and
 additionally has features to calculate lineups, on/off results, and player game and multi-game statistics.
@@ -98,3 +96,4 @@ This function finds all lineups from a given lineup data source that include/exc
 This function calculates many player stats for either individual games or aggregate to get multi-game stats.
 * Takes all parameters described in get_lineups() function
 * multi.games | When false stats will be calculated on a game level. When true all games will be aggregated.
+
