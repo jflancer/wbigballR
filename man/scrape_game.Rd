@@ -33,7 +33,7 @@ data frame containing play-by-play data for a game, where each row represents an
 \item{Time} - String for game time in format reported originally by NCAA
 \item{Game_Time} - String reporting game time elapsed. For example, a normal game starts at 00:00 and ends at 40:00
 \item{Game_Seconds} - Number of seconds elapsed in the game
-\item{Half_Status} - Number indicating which half: 1,2 for regulation, 3+ for OTs
+\item{Half_Status} - Period number: 1-2 for regulation halves (seasons through 2014-15) or 1-4 for regulation quarters (2015-16 on), then one per overtime
 \item{Home_Score} - Score for home team after event occurred as reported by NCAA
 \item{Away_Score} - Score for away team after event occurred as reported by NCAA
 \item{Event_Team} - Which team was repsonsibile for the play-by-play entry

@@ -21,7 +21,7 @@
 #' \item{Time} - String for game time in format reported originally by NCAA
 #' \item{Game_Time} - String reporting game time elapsed. For example, a normal game starts at 00:00 and ends at 40:00
 #' \item{Game_Seconds} - Number of seconds elapsed in the game
-#' \item{Half_Status} - Number indicating which half: 1,2 for regulation, 3+ for OTs
+#' \item{Half_Status} - Period number: 1-2 for regulation halves (seasons through 2014-15) or 1-4 for regulation quarters (2015-16 on), then one per overtime
 #' \item{Home_Score} - Score for home team after event occurred as reported by NCAA
 #' \item{Away_Score} - Score for away team after event occurred as reported by NCAA
 #' \item{Event_Team} - Which team was repsonsibile for the play-by-play entry
@@ -86,28 +86,36 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
     return(data.frame())
   }
   
-  # Pull scores for each half
+  # Pull the line score: one column per period plus the total
   half_scores <- table[[2]][1:2,]
   
-  # Get the data frames for the regulation portion
-  first_half <- table[[4]] %>%
-    dplyr::mutate_if(is.factor, as.character) %>%
-    dplyr::mutate(Half_Status = 1)
-  second_half <- table[[5]] %>%
-    dplyr::mutate_if(is.factor, as.character) %>%
-    dplyr::mutate(Half_Status = 2)
-  game <- dplyr::bind_rows(first_half, second_half)
+  # Period model, read from the page itself rather than from a season number
+  # (rules/wbb.yaml#wbb-2016-four-quarters, #wbb-2016-ncaa-stats-period-tables):
+  # the women's game played two 20:00 halves through 2014-15 and four 10:00
+  # quarters from 2015-16, and stats.ncaa.org serves one table per period in
+  # both eras. A clock above 10:00 in the first period table can only be a
+  # half (same inference as sdv-py mbb_ncaa_pbp_parser `is_women_game`); the
+  # line score cannot tell the eras apart on its own (halves + 2 OT has the
+  # same width as four quarters).
+  period_tables <- lapply(table[4:length(table)], function(x) dplyr::mutate_if(x, is.factor, as.character))
+  first_clock_mins <- suppressWarnings(as.numeric(substr(period_tables[[1]][, 1], 1, 2)))
+  n_regulation <- if (any(first_clock_mins > 10, na.rm = TRUE)) 2 else 4
+  period_seconds <- 2400 / n_regulation
+  period_start <- sprintf("%02d:00", period_seconds %/% 60)
   
-  # Check if overtime period(s) exist
-  if (ncol(half_scores) == 4) {
-    numbOTs <- 0
-  } else{
+  # Get the data frames for the regulation portion
+  first_half <- dplyr::mutate(period_tables[[1]], Half_Status = 1)
+  game <- first_half
+  for (i in 2:n_regulation) {
+    game <- dplyr::bind_rows(game, dplyr::mutate(period_tables[[i]], Half_Status = i))
+  }
+  
+  # Check if overtime period(s) exist: line score = team + regulation periods + total
+  numbOTs <- max(ncol(half_scores) - (n_regulation + 2), 0)
+  if (numbOTs > 0) {
     # Iterate through overtimes and add to game data frame
-    numbOTs <- length(half_scores) - 4
     for (i in 1:numbOTs) {
-      ot_data <- table[[5 + i]]  %>%
-        dplyr::mutate_if(is.factor, as.character) %>%
-        dplyr::mutate(Half_Status = 2 + i)
+      ot_data <- dplyr::mutate(period_tables[[n_regulation + i]], Half_Status = n_regulation + i)
       game <- dplyr::bind_rows(game, ot_data)
     }
   }
@@ -118,7 +126,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
   # Can find the format by looking at the first entries as they are constant and unique to each version
   # As V1 is older and uses less detail, we will format the data in accordance with V1
   format <-
-    if (((first_half[1, 1] == "20:00:00") &
+    if (((first_half[1, 1] == paste0(period_start, ":00")) &
          (first_half[1, 2] == "game start" |
           first_half[1, 2] == "period start"|
           first_half[1,2] == "jumpball startperiod")) |
@@ -157,9 +165,9 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
       }
     }))
   
-  game_time <- ifelse(game[, 5] < 2,
-                      1200 + 1200 * (game[, 5] - 1),
-                      2400 + 300 * (game[, 5] - 2)) - time_in_seconds
+  game_time <- ifelse(game[, 5] <= n_regulation,
+                      period_seconds * game[, 5],
+                      2400 + 300 * (game[, 5] - n_regulation)) - time_in_seconds
   
   # Differently formatted time that goes from 0 at game start to 40:00+ at end of game
   mins <- game_time %/% 60
@@ -521,7 +529,8 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
     # Find errors when an odd number of substitutions occur together
     mins_errors <- dirty_game %>%
       dplyr::filter(Event_Type %in% c("Leaves Game", "Enters Game"),
-                    Game_Seconds != 1200) %>%
+                    !is.na(Game_Seconds),
+                    !Game_Seconds %in% (period_seconds * seq_len(n_regulation - 1))) %>%
       dplyr::group_by(Game_Seconds) %>%
       dplyr::summarise(count = dplyr::n(), .groups = "keep") %>%
       dplyr::ungroup() %>%
@@ -547,7 +556,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
     away_player_matrix <- NA
     
     # Since starters aren't identified for each half, need to go through process to find them
-    for (i in 1:(2 + numbOTs)) {
+    for (i in 1:(n_regulation + numbOTs)) {
       #Iterates through the number of game session
       half_data <- dplyr::filter(dirty_game, Half_Status == i)
       
@@ -558,7 +567,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
                       Event_Type == "Leaves Game",
                       # Player_1 != "TEAM",
                       Time != "00:00",
-                      (Time != "20:00" & Half_Status %in% 1:2) | (Time != "05:00" & Half_Status >2)
+                      (Time != period_start & Half_Status %in% 1:n_regulation) | (Time != "05:00" & Half_Status > n_regulation)
         )$Player_1
       home_entering <-
         dplyr::filter(half_data,
@@ -566,7 +575,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
                       Event_Type == "Enters Game",
                       # Player_1 != "TEAM",
                       Time != "00:00",
-                      (Time != "20:00" & Half_Status %in% 1:2) | (Time != "05:00" & Half_Status >2)
+                      (Time != period_start & Half_Status %in% 1:n_regulation) | (Time != "05:00" & Half_Status > n_regulation)
         )$Player_1
       away_leaving <-
         dplyr::filter(half_data,
@@ -574,20 +583,20 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
                       Event_Type == "Leaves Game",
                       # Player_1 != "TEAM",
                       Time != "00:00",
-                      (Time != "20:00" & Half_Status %in% 1:2) | (Time != "05:00" & Half_Status >2)
+                      (Time != period_start & Half_Status %in% 1:n_regulation) | (Time != "05:00" & Half_Status > n_regulation)
         )$Player_1
       away_entering <-
         dplyr::filter(half_data,
                       Event_Team == Away,
                       Event_Type == "Enters Game",
                       # Player_1 != "TEAM",
-                      (Time != "20:00" & Half_Status %in% 1:2) | (Time != "05:00" & Half_Status >2)
+                      (Time != period_start & Half_Status %in% 1:n_regulation) | (Time != "05:00" & Half_Status > n_regulation)
         )$Player_1
       
       # Find players explicitly defined as starting
       true_home_starters <- (half_data %>%
                                dplyr::filter(Home == Event_Team,
-                                             (Time == "20:00" & Half_Status %in% 1:2) | (Time == "05:00" & Half_Status >2),
+                                             (Time == period_start & Half_Status %in% 1:n_regulation) | (Time == "05:00" & Half_Status > n_regulation),
                                              Time != "00:00",
                                              Event_Type == "Enters Game"
                                ))$Player_1
@@ -606,7 +615,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
       # Find players explicitly defined as beginning from bench
       true_home_nonstarters <- (half_data %>%
                                   dplyr::filter(Home == Event_Team,
-                                                (Time == "20:00" & Half_Status %in% 1:2) | (Time == "05:00" & Half_Status >2),
+                                                (Time == period_start & Half_Status %in% 1:n_regulation) | (Time == "05:00" & Half_Status > n_regulation),
                                                 Event_Type == "Leaves Game"
                                   ))$Player_1
       
@@ -732,7 +741,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
       # Repeated process is done for the away team, refer to comments above
       true_away_starters <- (half_data %>%
                                dplyr::filter(Away == Event_Team,
-                                             (Time == "20:00" & Half_Status %in% 1:2) | (Time == "05:00" & Half_Status >2),
+                                             (Time == period_start & Half_Status %in% 1:n_regulation) | (Time == "05:00" & Half_Status > n_regulation),
                                              Time != "00:00",
                                              Event_Type == "Enters Game"
                                ))$Player_1
@@ -750,7 +759,7 @@ scrape_game <- function(game_id, save_file=F, use_file=F, base_path = NA, overwr
       
       true_away_nonstarters <- (half_data %>%
                                   dplyr::filter(Away == Event_Team,
-                                                (Time == "20:00" & Half_Status %in% 1:2) | (Time == "05:00" & Half_Status >2),
+                                                (Time == period_start & Half_Status %in% 1:n_regulation) | (Time == "05:00" & Half_Status > n_regulation),
                                                 Event_Type == "Leaves Game"
                                   ))$Player_1
       
